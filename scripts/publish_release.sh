@@ -32,3 +32,4 @@ else
 fi
 
 echo "✓ Published $TAG to https://github.com/$REPO/releases/tag/$TAG"
+

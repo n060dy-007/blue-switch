@@ -278,6 +278,7 @@ struct SwitchingPane: View {
 struct NetworkPane: View {
   @ObservedObject private var s = AppSettings.shared
   @ObservedObject private var net = NetworkService.shared
+  @ObservedObject private var sec = SecurityMonitor.shared
   @State private var draftName = AppSettings.shared.deviceName
   @State private var draftPort = AppSettings.shared.listenPort
   @State private var draftType = AppSettings.shared.serviceType
@@ -291,10 +292,27 @@ struct NetworkPane: View {
 
   var body: some View {
     PaneContainer(pane: .network) {
-      Section("Status") {
+      Section("Status & Security Audit") {
         statusRow("Advertised as", net.publishedName ?? "—")
         statusRow("Listener", net.listenerStatus + (net.listeningPort.map { " · port \($0)" } ?? ""))
         statusRow("Discovery", net.browserStatus)
+        statusRow(
+          "Transport encryption",
+          s.encryptNetworkTraffic ? "AES-256-GCM + HKDF-SHA256 + Replay Guard" : "Disabled (Legacy)")
+        statusRow(
+          "Keystroke & Mouse Guard",
+          s.inputMonitoringGuardEnabled
+            ? "Active (\(sec.activeTapCount) system event tap(s) inspected)"
+            : "Paused")
+        HStack {
+          Text("Persistent security log")
+          Spacer()
+          Text(sec.auditLogFilePath).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+          Button("Reveal in Finder") {
+            NSWorkspace.shared.selectFile(sec.auditLogFilePath, inFileViewerRootedAtPath: "")
+          }
+          .controlSize(.small)
+        }
       }
 
       Section {
@@ -362,12 +380,22 @@ struct NetworkPane: View {
           value: $s.commandTimeout, range: 2...60, step: 1)
       }
 
-      Section("Security") {
+      Section("Transport Encryption & Connection Security") {
+        SettingToggle(
+          title: "Encrypt all peer-to-peer connections (AES-256-GCM)",
+          caption:
+            "Seals every network message with AES-256-GCM authenticated encryption, HKDF-SHA256 key derivation, and anti-replay nonces/timestamps.",
+          isOn: $s.encryptNetworkTraffic)
+        SettingToggle(
+          title: "Reject unencrypted remote commands",
+          caption:
+            "Blocks and logs any incoming switch, peripheral sync, or update command that is not encrypted with AES-256-GCM.",
+          isOn: $s.requireEncryptedConnections)
         HStack {
           SettingLabel(
-            title: "Pairing key",
+            title: "Pairing key (HKDF-SHA256 secret)",
             caption:
-              "Optional shared secret. When set, only Macs with the same key can control this one. Set the same key on both Macs.")
+              "Shared secret mixed into the AES-256-GCM encryption key. Only Macs with the matching key can decrypt or authenticate commands.")
           Spacer()
           Group {
             if revealKey {
@@ -383,6 +411,86 @@ struct NetworkPane: View {
             Image(systemName: revealKey ? "eye.slash" : "eye")
           }
           .buttonStyle(.borderless)
+        }
+      }
+
+      Section("Keystroke & Mouse Movement Surveillance Guard") {
+        SettingToggle(
+          title: "Monitor for keystroke & mouse movement loggers",
+          caption:
+            "Continuously inspects macOS WindowServer event taps (CGGetEventTapList) for any unauthorized process monitoring keystrokes or mouse movements.",
+          isOn: $s.inputMonitoringGuardEnabled)
+        SettingSlider(
+          title: "Surveillance scan interval",
+          caption: "How frequently BlueSwitch audits active system event taps.",
+          value: $s.inputGuardPollInterval, range: 0.5...10, step: 0.5
+        )
+        .disabled(!s.inputMonitoringGuardEnabled)
+        SettingToggle(
+          title: "Auto-remediate: Freeze & terminate offending process",
+          caption:
+            "Immediately sends SIGSTOP + SIGKILL to any unauthorized process caught tapping keystrokes or mouse movement.",
+          isOn: $s.autoRemediateKillProcess
+        )
+        .disabled(!s.inputMonitoringGuardEnabled)
+        SettingToggle(
+          title: "Auto-remediate: Disconnect / evacuate Bluetooth peripherals",
+          caption:
+            "Immediately releases your Magic Keyboard, Trackpad, and Mouse (or switches them to your safe peer Mac) when input surveillance is detected.",
+          isOn: $s.autoRemediateDisconnectPeripherals
+        )
+        .disabled(!s.inputMonitoringGuardEnabled)
+        SettingToggle(
+          title: "Show critical modal alert dialog on threat detection",
+          caption: "Brings up an immediate security alert window with process details and remediation status.",
+          isOn: $s.securityModalAlerts
+        )
+        .disabled(!s.inputMonitoringGuardEnabled)
+        HStack {
+          SettingLabel(
+            title: "Trusted input-monitoring processes",
+            caption: "Comma-separated bundle IDs or process names allowed to use event taps.")
+          Spacer()
+          TextField("e.g. com.apple.universalaccessd", text: $s.allowedInputMonitorProcesses)
+            .textFieldStyle(.roundedBorder).frame(width: 240)
+        }
+        HStack(spacing: 10) {
+          Button("Scan Event Taps Now") {
+            sec.scanNow()
+          }
+          Button("Simulate Keystroke/Mouse Logger Alert") {
+            sec.triggerSimulatedIncident()
+          }
+          if !sec.incidents.isEmpty {
+            Spacer()
+            Button("Clear Incident History", role: .destructive) {
+              sec.clearIncidents()
+            }
+          }
+        }
+        if !sec.incidents.isEmpty {
+          ForEach(sec.incidents.prefix(8)) { inc in
+            VStack(alignment: .leading, spacing: 3) {
+              HStack {
+                Label(
+                  "\(inc.processName) (PID \(inc.pid)) — \(inc.capturedTypesDescription)",
+                  systemImage: "exclamationmark.shield.fill"
+                )
+                .font(.callout.weight(.semibold))
+                .foregroundStyle(Theme.red)
+                Spacer()
+                Text(inc.timestamp, style: .time)
+                  .font(.caption2).foregroundStyle(.secondary)
+              }
+              Text(inc.executablePath)
+                .font(.caption2.monospaced())
+                .foregroundStyle(.secondary)
+              Text("Remediation: \(inc.remediationSummary)")
+                .font(.caption)
+                .foregroundStyle(inc.isResolved ? Theme.green : Theme.red)
+            }
+            .padding(.vertical, 4)
+          }
         }
       }
     }
@@ -426,6 +534,10 @@ struct NotificationsPane: View {
       }
 
       Section("Notify me when…") {
+        SettingToggle(
+          title: "Keystroke / mouse surveillance or security alert occurs",
+          caption: "Critical alert when an unauthorized event tap or unencrypted request is detected.",
+          isOn: $s.notifyOnSecurityAlert)
         SettingToggle(title: "A switch completes", isOn: $s.notifyOnSwitch)
         SettingToggle(title: "Something goes wrong", isOn: $s.notifyOnError)
         SettingToggle(

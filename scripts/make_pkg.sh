@@ -49,3 +49,4 @@ pkgbuild \
 
 rm -rf "$WORK"
 echo "✓ $PKG ($(du -h "$PKG" | cut -f1))"
+

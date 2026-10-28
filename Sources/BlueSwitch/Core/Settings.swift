@@ -148,9 +148,13 @@ final class AppSettings: ObservableObject {
     case autoAcceptBluetoothRequests, autoAcceptScope, autoAcceptPollInterval
     case partialStateBehavior, autoSyncPeripherals, reclaimOnLaunch
     case releaseOnSleep, reclaimOnWake
-    // Network
+    // Network & Security
     case deviceName, listenPort, serviceType, healthCheckTimeout
     case commandTimeout, discoveryEnabled, pairingKey, activePeerID
+    case encryptNetworkTraffic, requireEncryptedConnections
+    case inputMonitoringGuardEnabled, inputGuardPollInterval
+    case autoRemediateKillProcess, autoRemediateDisconnectPeripherals
+    case securityModalAlerts, notifyOnSecurityAlert, allowedInputMonitorProcesses
     // Notifications
     case notificationsEnabled, notificationSound, notifyOnSwitch, notifyOnError
     case notifyOnPeerFound, notifyOnRemoteRequest, confirmSentNotification
@@ -287,6 +291,37 @@ final class AppSettings: ObservableObject {
   @Published var activePeerID: String = AppSettings.load(.activePeerID, "") {
     didSet { Self.save(.activePeerID, activePeerID) }
   }
+  @Published var encryptNetworkTraffic: Bool = AppSettings.load(.encryptNetworkTraffic, true) {
+    didSet { Self.save(.encryptNetworkTraffic, encryptNetworkTraffic) }
+  }
+  @Published var requireEncryptedConnections: Bool = AppSettings.load(.requireEncryptedConnections, true) {
+    didSet { Self.save(.requireEncryptedConnections, requireEncryptedConnections) }
+  }
+  @Published var inputMonitoringGuardEnabled: Bool = AppSettings.load(.inputMonitoringGuardEnabled, true) {
+    didSet { Self.save(.inputMonitoringGuardEnabled, inputMonitoringGuardEnabled) }
+  }
+  @Published var inputGuardPollInterval: Double = AppSettings.load(.inputGuardPollInterval, 2.0) {
+    didSet { Self.save(.inputGuardPollInterval, inputGuardPollInterval) }
+  }
+  @Published var autoRemediateKillProcess: Bool = AppSettings.load(.autoRemediateKillProcess, true) {
+    didSet { Self.save(.autoRemediateKillProcess, autoRemediateKillProcess) }
+  }
+  @Published var autoRemediateDisconnectPeripherals: Bool = AppSettings.load(
+    .autoRemediateDisconnectPeripherals, true)
+  {
+    didSet { Self.save(.autoRemediateDisconnectPeripherals, autoRemediateDisconnectPeripherals) }
+  }
+  @Published var securityModalAlerts: Bool = AppSettings.load(.securityModalAlerts, true) {
+    didSet { Self.save(.securityModalAlerts, securityModalAlerts) }
+  }
+  @Published var notifyOnSecurityAlert: Bool = AppSettings.load(.notifyOnSecurityAlert, true) {
+    didSet { Self.save(.notifyOnSecurityAlert, notifyOnSecurityAlert) }
+  }
+  @Published var allowedInputMonitorProcesses: String = AppSettings.load(
+    .allowedInputMonitorProcesses, "")
+  {
+    didSet { Self.save(.allowedInputMonitorProcesses, allowedInputMonitorProcesses) }
+  }
 
   // MARK: Notifications
   @Published var notificationsEnabled: Bool = AppSettings.load(.notificationsEnabled, true) {
@@ -383,6 +418,10 @@ final class AppSettings: ObservableObject {
     releaseOnSleep = false; reclaimOnWake = false
     deviceName = ""; listenPort = 0; serviceType = "_blueswitch._tcp"; healthCheckTimeout = 5
     commandTimeout = 10; discoveryEnabled = true; pairingKey = ""
+    encryptNetworkTraffic = true; requireEncryptedConnections = true
+    inputMonitoringGuardEnabled = true; inputGuardPollInterval = 2.0
+    autoRemediateKillProcess = true; autoRemediateDisconnectPeripherals = true
+    securityModalAlerts = true; notifyOnSecurityAlert = true; allowedInputMonitorProcesses = ""
     notificationsEnabled = true; notificationSound = true; notifyOnSwitch = true
     notifyOnError = true; notifyOnPeerFound = false; notifyOnRemoteRequest = true
     confirmSentNotification = true; customNotifyTitle = "New Notification"

@@ -37,3 +37,4 @@ codesign --force --deep --sign - /Applications/BlueSwitch.app 2>/dev/null || tru
 echo "▸ Launching BlueSwitch …"
 open /Applications/BlueSwitch.app
 echo "✓ BlueSwitch updated from GitHub release!"
+

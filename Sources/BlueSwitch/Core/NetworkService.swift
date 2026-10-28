@@ -128,8 +128,15 @@ final class NetworkService: ObservableObject {
   }
 
   private func accept(_ conn: NWConnection) {
-    let server = ServerConnection(connection: conn, queue: queue) { [weak self] msg, reply in
-      self?.handleIncoming(msg, reply: reply)
+    let remoteDesc = conn.endpoint.debugDescription
+    SecurityMonitor.shared.recordAudit(
+      category: "Network",
+      message: "Accepted incoming TCP connection from \(remoteDesc)",
+      level: .debug
+    )
+    let server = ServerConnection(connection: conn, queue: queue) {
+      [weak self] msg, remoteEndpoint, reply in
+      self?.handleIncoming(msg, remoteEndpoint: remoteEndpoint, reply: reply)
     }
     let key = ObjectIdentifier(server)
     server.onClose = { [weak self] in
@@ -139,17 +146,55 @@ final class NetworkService: ObservableObject {
     server.start()
   }
 
-  private func handleIncoming(_ msg: PeerMessage, reply: @escaping (PeerMessage) -> Void) {
+  private func handleIncoming(
+    _ msg: PeerMessage, remoteEndpoint: String, reply: @escaping (PeerMessage) -> Void
+  ) {
     DispatchQueue.main.async {
+      let encrypted = msg.isEncryptedOnWire == true
+      let cipherLabel = encrypted ? PeerCrypto.cipherName : "UNENCRYPTED-LEGACY"
+
+      // Enforce encryption requirement for control commands if requireEncryptedConnections is on
+      if self.settings.requireEncryptedConnections && !encrypted && msg.kind != .ping {
+        SecurityMonitor.shared.recordAudit(
+          category: "Security",
+          message:
+            "REJECTED unencrypted \(msg.kind.rawValue) from \(msg.sender) (\(remoteEndpoint)) — AES-256-GCM encryption required",
+          level: .error
+        )
+        NotificationService.post(
+          title: "Blocked Unencrypted Peer Request",
+          body: "Rejected unencrypted \(msg.kind.rawValue) from \(msg.sender) (\(remoteEndpoint)).",
+          kind: .securityAlert
+        )
+        var e = PeerMessage.make(.error)
+        e.body = "Encrypted connection (AES-256-GCM) is required by \(self.settings.effectiveDeviceName)"
+        reply(e)
+        return
+      }
+
+      // Legacy fallback key check if unencrypted ping arrives
       let expected = self.settings.pairingKey
-      if !expected.isEmpty && msg.key != expected {
-        Log.warn("Rejected \(msg.kind.rawValue) from \(msg.sender): bad pairing key", "Network")
+      if !encrypted && !expected.isEmpty && msg.key != expected {
+        SecurityMonitor.shared.recordAudit(
+          category: "Security",
+          message:
+            "Rejected \(msg.kind.rawValue) from \(msg.sender) (\(remoteEndpoint)): pairing key mismatch",
+          level: .warning
+        )
         var e = PeerMessage.make(.error)
         e.body = "Pairing key mismatch"
         reply(e)
         return
       }
-      Log.debug("Received \(msg.kind.rawValue) from \(msg.sender)", "Network")
+
+      let logLevel: LogLevel = (msg.kind == .ping) ? .debug : .info
+      SecurityMonitor.shared.recordAudit(
+        category: "Network",
+        message:
+          "Authenticated incoming \(msg.kind.rawValue) from \(msg.sender) (\(remoteEndpoint)) [\(cipherLabel)]",
+        level: logLevel
+      )
+
       guard let handler = self.requestHandler else {
         reply(PeerMessage.make(.error))
         return
@@ -280,7 +325,12 @@ final class NetworkService: ObservableObject {
       return
     }
     let t = timeout ?? settings.commandTimeout
-    Log.debug("Sending \(message.kind.rawValue) to \(peer.name)", "Network")
+    let cipher = settings.encryptNetworkTraffic ? PeerCrypto.cipherName : "UNENCRYPTED"
+    SecurityMonitor.shared.recordAudit(
+      category: "Network",
+      message: "Sending \(message.kind.rawValue) to \(peer.name) (\(ep)) [\(cipher)]",
+      level: .info
+    )
     PeerRequest(endpoint: ep, message: message, timeout: max(1, t)) { [weak self] result, remote in
       self?.recordResult(id: peer.id, result: result, remote: remote)
       completion(result)
@@ -336,7 +386,16 @@ final class NetworkService: ObservableObject {
         UpdateChecker.shared.maybeAutoUpdatePeer(updatedPeer)
       }
     case .failure(let e):
-      if case .rejected = e { reachability[id] = .online } else { reachability[id] = .offline }
+      if case .rejected(let reason) = e {
+        reachability[id] = .online
+        SecurityMonitor.shared.recordAudit(
+          category: "Security",
+          message: "Peer \(id) rejected request: \(reason)",
+          level: .warning
+        )
+      } else {
+        reachability[id] = .offline
+      }
     }
   }
 
@@ -366,17 +425,17 @@ final class NetworkService: ObservableObject {
 
 // MARK: - ServerConnection
 
-/// Handles one incoming TCP connection: reads JSON lines, replies to each.
+/// Handles one incoming TCP connection: reads AES-256-GCM encrypted JSON lines, replies to each.
 final class ServerConnection {
   private let connection: NWConnection
   private let queue: DispatchQueue
-  private let handler: (PeerMessage, @escaping (PeerMessage) -> Void) -> Void
+  private let handler: (PeerMessage, String, @escaping (PeerMessage) -> Void) -> Void
   private var buffer = LineBuffer()
   var onClose: (() -> Void)?
 
   init(
     connection: NWConnection, queue: DispatchQueue,
-    handler: @escaping (PeerMessage, @escaping (PeerMessage) -> Void) -> Void
+    handler: @escaping (PeerMessage, String, @escaping (PeerMessage) -> Void) -> Void
   ) {
     self.connection = connection
     self.queue = queue
@@ -400,9 +459,35 @@ final class ServerConnection {
     connection.receive(minimumIncompleteLength: 1, maximumLength: 524_288) {
       [weak self] data, _, isComplete, error in
       guard let self else { return }
+      let remoteDesc =
+        self.connection.currentPath?.remoteEndpoint?.debugDescription
+        ?? self.connection.endpoint.debugDescription
       if let data, !data.isEmpty {
-        for msg in self.buffer.append(data) {
-          self.handler(msg) { [weak self] response in self?.send(response) }
+        for frame in self.buffer.append(data) {
+          switch frame {
+          case .message(let msg):
+            let encryptReply = (msg.isEncryptedOnWire == true) && AppSettings.shared.encryptNetworkTraffic
+            self.handler(msg, remoteDesc) { [weak self] response in
+              self?.send(response, encrypt: encryptReply)
+            }
+          case .securityError(let sender, let reason):
+            DispatchQueue.main.async {
+              SecurityMonitor.shared.recordAudit(
+                category: "Security",
+                message:
+                  "SECURITY ALERT: Blocked tampered or unauthenticated message from \(sender) (\(remoteDesc)): \(reason)",
+                level: .error
+              )
+              NotificationService.post(
+                title: "⚠️ Blocked Unauthenticated Network Request",
+                body: "Connection from \(sender) (\(remoteDesc)) failed AES-256-GCM verification: \(reason)",
+                kind: .securityAlert
+              )
+            }
+            var err = PeerMessage.make(.error)
+            err.body = reason
+            self.send(err, encrypt: false)
+          }
         }
       }
       if error != nil || isComplete {
@@ -413,8 +498,8 @@ final class ServerConnection {
     }
   }
 
-  private func send(_ msg: PeerMessage) {
-    guard let data = msg.encodedLine() else { return }
+  private func send(_ msg: PeerMessage, encrypt: Bool) {
+    guard let data = msg.encodedLine(encrypt: encrypt) else { return }
     connection.send(content: data, completion: .contentProcessed { _ in })
   }
 }

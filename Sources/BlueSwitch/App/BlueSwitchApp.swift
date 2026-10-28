@@ -28,6 +28,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     BluetoothService.shared.requestAccess()
     BluetoothService.shared.startMonitoring()
     BluetoothAutoClicker.shared.start()
+    SecurityMonitor.shared.start()
     NetworkService.shared.start()
     SwitchCoordinator.shared.start()
 
@@ -85,6 +86,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     .dropFirst(2)
     .debounce(for: .milliseconds(300), scheduler: DispatchQueue.main)
     .sink { BluetoothAutoClicker.shared.restartTimer() }
+    .store(in: &cancellables)
+
+    Publishers.Merge(
+      settings.$inputMonitoringGuardEnabled.map { _ in () },
+      settings.$inputGuardPollInterval.map { _ in () }
+    )
+    .dropFirst(2)
+    .debounce(for: .milliseconds(300), scheduler: DispatchQueue.main)
+    .sink { SecurityMonitor.shared.restartTimer() }
     .store(in: &cancellables)
 
     Publishers.MergeMany(

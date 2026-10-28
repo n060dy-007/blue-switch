@@ -265,7 +265,16 @@ final class BluetoothService: NSObject, ObservableObject {
           let connected = self.performConnectPass(
             for: p, pass: pass, totalPasses: attempts, pairTimeout: pairTimeout)
           if connected {
-            Log.info("Connected \(p.displayName) (attempt \(pass)/\(attempts))", "Bluetooth")
+            let paired = IOBluetoothDevice(addressString: p.id)?.isPaired() ?? true
+            SecurityMonitor.shared.recordAudit(
+              category: "Bluetooth",
+              message:
+                "Connected \(p.displayName) (\(p.id)) on attempt \(pass)/\(attempts) [Link Security: \(paired ? "Paired & Encrypted (Bluetooth Link Key)" : "Unpaired")]",
+              level: .info
+            )
+            DispatchQueue.main.async {
+              SecurityMonitor.shared.scanNow()
+            }
             self.markFinished(p, connected: true)
           } else {
             Log.debug(
@@ -467,7 +476,11 @@ final class BluetoothService: NSObject, ObservableObject {
       let sel = Selector(("remove"))
       if device.responds(to: sel) {
         unpairOnMain(device, name: p.displayName)
-        Log.info("Unpaired \(p.displayName) from this Mac", "Bluetooth")
+        SecurityMonitor.shared.recordAudit(
+          category: "Bluetooth",
+          message: "Released & unpaired \(p.displayName) (\(p.id)) from this Mac",
+          level: .info
+        )
       } else {
         Log.warn("Unpair unavailable; closing connection for \(p.displayName)", "Bluetooth")
         device.closeConnection()
@@ -475,7 +488,11 @@ final class BluetoothService: NSObject, ObservableObject {
     case .closeConnection:
       if device.isConnected() {
         let r = device.closeConnection()
-        Log.info("Closed connection to \(p.displayName) (\(r))", "Bluetooth")
+        SecurityMonitor.shared.recordAudit(
+          category: "Bluetooth",
+          message: "Closed Bluetooth connection to \(p.displayName) (\(p.id)) (status \(r))",
+          level: .info
+        )
       }
     }
   }

@@ -288,7 +288,7 @@ final class SwitchCoordinator: ObservableObject {
     case .installUpdate:
       UpdateChecker.shared.handleIncomingUpdate(msg, reply: reply)
 
-    case .pong, .ok, .error:
+    case .pong, .ok, .error, .encrypted:
       reply(PeerMessage.make(.error))
     }
   }

@@ -3,7 +3,7 @@ import UserNotifications
 
 /// Wraps UNUserNotificationCenter and applies the Notifications settings.
 enum NotificationService {
-  enum Kind { case switchResult, error, peerFound, remoteRequest, message, general }
+  enum Kind { case switchResult, error, peerFound, remoteRequest, message, securityAlert, general }
 
   /// UNUserNotificationCenter crashes when there is no bundle (e.g. `swift run`).
   private static var available: Bool { Bundle.main.bundleIdentifier != nil }
@@ -38,7 +38,11 @@ enum NotificationService {
 
   static func post(title: String, body: String, kind: Kind = .general) {
     let s = AppSettings.shared
-    guard s.notificationsEnabled else { return }
+    if kind != .securityAlert {
+      guard s.notificationsEnabled else { return }
+    } else {
+      guard s.notifyOnSecurityAlert else { return }
+    }
     switch kind {
     case .switchResult where !s.notifyOnSwitch: return
     case .error where !s.notifyOnError: return
@@ -53,7 +57,7 @@ enum NotificationService {
     let content = UNMutableNotificationContent()
     content.title = title
     content.body = body
-    if s.notificationSound { content.sound = .default }
+    if s.notificationSound || kind == .securityAlert { content.sound = .defaultCritical }
     let req = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
     UNUserNotificationCenter.current().add(req) { error in
       if let error { Log.warn("Failed to show notification: \(error)", "Notify") }

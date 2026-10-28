@@ -10,12 +10,39 @@ struct DashboardView: View {
   @ObservedObject private var settings = AppSettings.shared
   @ObservedObject private var clicker = BluetoothAutoClicker.shared
   @ObservedObject private var updates = UpdateChecker.shared
+  @ObservedObject private var sec = SecurityMonitor.shared
 
   var body: some View {
     VStack(spacing: 0) {
       header
       ScrollView {
         VStack(spacing: 12) {
+          if let latestIncident = sec.incidents.first {
+            Card {
+              VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 8) {
+                  Image(systemName: "exclamationmark.shield.fill")
+                    .font(.title3)
+                    .foregroundStyle(Theme.red)
+                  VStack(alignment: .leading, spacing: 1) {
+                    Text("Security Alert: \(latestIncident.capturedTypesDescription) Monitor")
+                      .font(.caption.weight(.bold))
+                      .foregroundStyle(Theme.red)
+                    Text("\(latestIncident.processName) (PID \(latestIncident.pid))")
+                      .font(.caption2.weight(.semibold))
+                  }
+                  Spacer()
+                  Button("Details") {
+                    openSettings(.network)
+                  }
+                  .controlSize(.small)
+                }
+                Text("Remediation: \(latestIncident.remediationSummary)")
+                  .font(.caption2)
+                  .foregroundStyle(.secondary)
+              }
+            }
+          }
           if updates.hasNewerReleaseOnline, let tag = updates.latestVersionTag {
             Card {
               HStack(spacing: 10) {
