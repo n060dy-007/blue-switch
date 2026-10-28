@@ -6,13 +6,14 @@ import SwiftUI
 struct ActivityPane: View {
   @ObservedObject private var log = Log.shared
   @ObservedObject private var s = AppSettings.shared
+  @ObservedObject private var demo = DemoMode.shared
   @State private var filter: LogLevel = .debug
   @State private var search = ""
 
   private var filtered: [LogEntry] {
     log.entries.reversed().filter { e in
       e.level >= filter
-        && (search.isEmpty || e.message.localizedCaseInsensitiveContains(search)
+        && (search.isEmpty || e.displayMessage.localizedCaseInsensitiveContains(search)
           || e.category.localizedCaseInsensitiveContains(search))
     }
   }
@@ -86,7 +87,7 @@ struct ActivityPane: View {
         .frame(width: 62, alignment: .leading)
       Text(e.category).font(.caption.weight(.semibold)).foregroundStyle(.secondary)
         .frame(width: 70, alignment: .leading)
-      Text(e.message).font(.callout).textSelection(.enabled)
+      Text(e.displayMessage).font(.callout).textSelection(.enabled)
       Spacer(minLength: 0)
     }
     .padding(.horizontal, 12).padding(.vertical, 6)

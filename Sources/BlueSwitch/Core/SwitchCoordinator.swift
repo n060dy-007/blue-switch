@@ -64,15 +64,24 @@ final class SwitchCoordinator: ObservableObject {
   /// Upstream left-click behavior: toggle peripherals between this Mac and the peer.
   func switchDevices() {
     guard !phase.isWorking else { return }
+    if DemoMode.shared.isSimulatingSwitch {
+      if DemoMode.shared.demoPeripheralsConnectedHere {
+        simulateDemoSwitch(sendToPeer: true)
+      } else {
+        simulateDemoSwitch(sendToPeer: false)
+      }
+      return
+    }
     if settings.confirmBeforeSwitching && !confirm() { return }
     guard let peer = requirePeer() else { return }
 
-    setPhase(.working("Checking \(peer.name)…"))
+    let displayName = DemoMode.shared.peerDisplayName(peer)
+    setPhase(.working("Checking \(displayName)…"))
     net.ping(id: peer.id) { [weak self] result in
       guard let self else { return }
       switch result {
       case .failure(let e):
-        self.fail("Can't reach \(peer.name): \(e.localizedDescription)")
+        self.fail("Can't reach \(displayName): \(e.localizedDescription)")
       case .success(let pong):
         switch self.bt.connectionState {
         case .none:
@@ -107,14 +116,49 @@ final class SwitchCoordinator: ObservableObject {
 
   /// Release peripherals here and ask the peer to connect them.
   func sendToPeer() {
-    guard !phase.isWorking, let peer = requirePeer() else { return }
+    guard !phase.isWorking else { return }
+    if DemoMode.shared.isSimulatingSwitch {
+      simulateDemoSwitch(sendToPeer: true)
+      return
+    }
+    guard let peer = requirePeer() else { return }
     performSend(to: peer)
   }
 
   /// Ask the peer to release peripherals, then connect them here.
   func takeFromPeer() {
-    guard !phase.isWorking, let peer = requirePeer() else { return }
+    guard !phase.isWorking else { return }
+    if DemoMode.shared.isSimulatingSwitch {
+      simulateDemoSwitch(sendToPeer: false)
+      return
+    }
+    guard let peer = requirePeer() else { return }
     performTake(from: peer)
+  }
+
+  private func simulateDemoSwitch(sendToPeer: Bool) {
+    let peerName = DemoMode.shared.effectiveActivePeer?.name ?? "MacBook Pro 16\""
+    if sendToPeer {
+      setPhase(.working("Releasing peripherals…"))
+      DispatchQueue.main.asyncAfter(deadline: .now() + 0.55) { [weak self] in
+        self?.setPhase(.working("Handing off to \(peerName) [AES-256-GCM]…"))
+      }
+      DispatchQueue.main.asyncAfter(deadline: .now() + 1.15) { [weak self] in
+        DemoMode.shared.demoPeripheralsConnectedHere = false
+        self?.applyAudioOnRelease()
+        self?.succeed("Peripherals sent to \(peerName)")
+      }
+    } else {
+      setPhase(.working("Asking \(peerName) to release [AES-256-GCM]…"))
+      DispatchQueue.main.asyncAfter(deadline: .now() + 0.55) { [weak self] in
+        self?.setPhase(.working("Connecting Magic Keyboard, Trackpad & Mouse…"))
+      }
+      DispatchQueue.main.asyncAfter(deadline: .now() + 1.15) { [weak self] in
+        DemoMode.shared.demoPeripheralsConnectedHere = true
+        self?.applyAudioOnConnect()
+        self?.succeed("Peripherals connected to Mac Studio")
+      }
+    }
   }
 
   func sendTestNotification(to peer: PeerDevice) {

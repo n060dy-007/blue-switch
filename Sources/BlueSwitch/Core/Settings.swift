@@ -142,6 +142,7 @@ final class AppSettings: ObservableObject {
     case launchAtLogin, showDockIcon, appearance, menuBarIcon, leftClickAction
     case confirmBeforeSwitching, autoCheckUpdates, autoInstallUpdates, updateRepository
     case autoUpdatePeers, allowRemoteUpdates
+    case demoModeEnabled, demoSimulateSwitching
     // Switching & Audio
     case disconnectMethod, disconnectPollInterval, disconnectMaxAttempts
     case connectRetryCount, connectRetryDelay, settleDelay, pairAttemptTimeout, requireInRange
@@ -162,7 +163,7 @@ final class AppSettings: ObservableObject {
     case customNotifyTitle, customNotifyBody
     // Shortcuts
     case hotkeysEnabled, hotkeySwitch, hotkeySendToPeer, hotkeyTakeFromPeer
-    case hotkeyMuteMic, hotkeyMuteSpeakers
+    case hotkeyMuteMic, hotkeyMuteSpeakers, hotkeyDemoMode
     // Advanced
     case logLevel, maxLogEntries, statusRefreshInterval
   }
@@ -210,6 +211,18 @@ final class AppSettings: ObservableObject {
   }
   @Published var allowRemoteUpdates: Bool = AppSettings.load(.allowRemoteUpdates, true) {
     didSet { Self.save(.allowRemoteUpdates, allowRemoteUpdates) }
+  }
+  @Published var demoModeEnabled: Bool = AppSettings.load(.demoModeEnabled, false) {
+    didSet {
+      Self.save(.demoModeEnabled, demoModeEnabled)
+      DemoMode.shared.objectWillChange.send()
+    }
+  }
+  @Published var demoSimulateSwitching: Bool = AppSettings.load(.demoSimulateSwitching, true) {
+    didSet {
+      Self.save(.demoSimulateSwitching, demoSimulateSwitching)
+      DemoMode.shared.objectWillChange.send()
+    }
   }
 
   // MARK: Switching
@@ -390,6 +403,9 @@ final class AppSettings: ObservableObject {
   @Published var hotkeyMuteSpeakers = KeyCombo(encoded: AppSettings.load(.hotkeyMuteSpeakers, "")) {
     didSet { Self.save(.hotkeyMuteSpeakers, hotkeyMuteSpeakers.encoded) }
   }
+  @Published var hotkeyDemoMode = KeyCombo(encoded: AppSettings.load(.hotkeyDemoMode, "")) {
+    didSet { Self.save(.hotkeyDemoMode, hotkeyDemoMode.encoded) }
+  }
 
   // MARK: Advanced
   @Published var logLevel: LogLevel = AppSettings.loadEnum(.logLevel, LogLevel.info) {
@@ -432,6 +448,7 @@ final class AppSettings: ObservableObject {
     autoInstallUpdates = false
     updateRepository = "n060dy-007/blue-switch"
     autoUpdatePeers = true; allowRemoteUpdates = true
+    demoModeEnabled = false; demoSimulateSwitching = true
     disconnectMethod = .unpair; disconnectPollInterval = 0.5; disconnectMaxAttempts = 5
     connectRetryCount = 4; connectRetryDelay = 1.0; settleDelay = 0.8; pairAttemptTimeout = 5.0
     requireInRange = false
@@ -454,6 +471,7 @@ final class AppSettings: ObservableObject {
     customNotifyBody = "You have a new notification from {device}"
     hotkeysEnabled = true; hotkeySwitch = .none; hotkeySendToPeer = .none
     hotkeyTakeFromPeer = .none; hotkeyMuteMic = .none; hotkeyMuteSpeakers = .none
+    hotkeyDemoMode = .none
     logLevel = .info; maxLogEntries = 500; statusRefreshInterval = 3
   }
 

@@ -8,9 +8,18 @@ struct LogEntry: Identifiable {
   let category: String
   let message: String
 
+  var displayMessage: String {
+    DemoMode.shared.sanitizeLog(message)
+  }
+
   var line: String {
     let f = ISO8601DateFormatter()
     return "\(f.string(from: date)) [\(level.label.uppercased())] [\(category)] \(message)"
+  }
+
+  var displayLine: String {
+    let f = ISO8601DateFormatter()
+    return "\(f.string(from: date)) [\(level.label.uppercased())] [\(category)] \(displayMessage)"
   }
 }
 
@@ -44,5 +53,5 @@ final class Log: ObservableObject {
 
   func clear() { entries.removeAll() }
 
-  var exportText: String { entries.map(\.line).joined(separator: "\n") }
+  var exportText: String { entries.map(\.displayLine).joined(separator: "\n") }
 }

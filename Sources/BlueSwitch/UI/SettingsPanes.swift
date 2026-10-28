@@ -55,6 +55,21 @@ struct GeneralPane: View {
           isOn: $s.showDockIcon)
       }
 
+      Section("Demo & Screen Recording Mode") {
+        SettingToggle(
+          title: "Demo Mode (Hide personal information for public recording)",
+          caption:
+            "Replaces computer names, peer Mac names, IP addresses, Bluetooth MAC addresses, personal device names, file paths, and log details with clean studio placeholders.",
+          isOn: $s.demoModeEnabled)
+        SettingToggle(
+          title: "Simulate live switching & populate sample Macs/peripherals",
+          caption:
+            "Shows sample Macs (MacBook Pro 16\", Studio Mac mini) and peripherals (Magic Keyboard, Trackpad, Mouse) and animates switching on screen without disconnecting your live keyboard or mouse during a recording.",
+          isOn: $s.demoSimulateSwitching
+        )
+        .disabled(!s.demoModeEnabled)
+      }
+
       Section("Updates & Peer Auto-Update") {
         SettingToggle(
           title: "Automatically update other Macs over the network",
@@ -77,12 +92,19 @@ struct GeneralPane: View {
         HStack {
           SettingLabel(title: "Release feed", caption: "GitHub repository in owner/name form.")
           Spacer()
-          TextField("owner/repo", text: $s.updateRepository)
-            .textFieldStyle(.roundedBorder)
-            .frame(width: 240)
+          if s.demoModeEnabled {
+            TextField("owner/repo", text: .constant("demo-org/blue-switch"))
+              .textFieldStyle(.roundedBorder)
+              .frame(width: 240)
+              .disabled(true)
+          } else {
+            TextField("owner/repo", text: $s.updateRepository)
+              .textFieldStyle(.roundedBorder)
+              .frame(width: 240)
+          }
         }
         VStack(alignment: .leading, spacing: 8) {
-          Text(updates.status).font(.callout).foregroundStyle(.secondary)
+          Text(DemoMode.shared.sanitizeLog(updates.status)).font(.callout).foregroundStyle(.secondary)
           HStack(spacing: 8) {
             if updates.hasNewerReleaseOnline {
               Button(updates.isInstalling ? "Installing…" : "Download & Install from GitHub") {
@@ -259,7 +281,8 @@ struct SwitchingPane: View {
       Section("Audio Controls & Switch Automation (Microphone & Speakers)") {
         HStack(spacing: 12) {
           SettingLabel(
-            title: "Microphone (\(audio.inputDeviceName))",
+            title:
+              "Microphone (\(DemoMode.shared.audioDeviceDisplayName(audio.inputDeviceName, isInput: true)))",
             caption: audio.isMicMuted ? "Currently MUTED" : "Input volume: \(audio.micVolume)%")
           Spacer()
           Slider(
@@ -278,7 +301,8 @@ struct SwitchingPane: View {
         }
         HStack(spacing: 12) {
           SettingLabel(
-            title: "Speakers (\(audio.outputDeviceName))",
+            title:
+              "Speakers (\(DemoMode.shared.audioDeviceDisplayName(audio.outputDeviceName, isInput: false)))",
             caption: audio.isSpeakersMuted
               ? "Currently MUTED" : "Output volume: \(audio.speakersVolume)%")
           Spacer()
@@ -341,6 +365,7 @@ struct NetworkPane: View {
   @ObservedObject private var s = AppSettings.shared
   @ObservedObject private var net = NetworkService.shared
   @ObservedObject private var sec = SecurityMonitor.shared
+  @ObservedObject private var demo = DemoMode.shared
   @State private var draftName = AppSettings.shared.deviceName
   @State private var draftPort = AppSettings.shared.listenPort
   @State private var draftType = AppSettings.shared.serviceType
@@ -355,8 +380,8 @@ struct NetworkPane: View {
   var body: some View {
     PaneContainer(pane: .network) {
       Section("Status & Security Audit") {
-        statusRow("Advertised as", net.publishedName ?? "—")
-        statusRow("Listener", net.listenerStatus + (net.listeningPort.map { " · port \($0)" } ?? ""))
+        statusRow("Advertised as", demo.publishedServiceDisplayName)
+        statusRow("Listener", net.listenerStatus + demo.listeningPortDisplay)
         statusRow("Discovery", net.browserStatus)
         statusRow(
           "Transport encryption",
@@ -369,11 +394,13 @@ struct NetworkPane: View {
         HStack {
           Text("Persistent security log")
           Spacer()
-          Text(sec.auditLogFilePath).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+          Text(demo.sanitizePath(sec.auditLogFilePath))
+            .font(.caption).foregroundStyle(.secondary).lineLimit(1)
           Button("Reveal in Finder") {
             NSWorkspace.shared.selectFile(sec.auditLogFilePath, inFileViewerRootedAtPath: "")
           }
           .controlSize(.small)
+          .disabled(s.demoModeEnabled)
         }
       }
 
@@ -382,16 +409,28 @@ struct NetworkPane: View {
           SettingLabel(
             title: "Device name", caption: "Name other Macs see. Leave blank to use the computer name.")
           Spacer()
-          TextField(Host.current().localizedName ?? "Mac", text: $draftName)
-            .textFieldStyle(.roundedBorder).frame(width: 220)
+          if s.demoModeEnabled {
+            TextField("Mac Studio", text: .constant("Mac Studio"))
+              .textFieldStyle(.roundedBorder).frame(width: 220)
+              .disabled(true)
+          } else {
+            TextField(Host.current().localizedName ?? "Mac", text: $draftName)
+              .textFieldStyle(.roundedBorder).frame(width: 220)
+          }
         }
         HStack {
           SettingLabel(
             title: "Listening port",
             caption: "0 = automatic. Set a fixed port if you add this Mac manually on the other side.")
           Spacer()
-          TextField("0", value: $draftPort, format: .number.grouping(.never))
-            .textFieldStyle(.roundedBorder).frame(width: 90)
+          if s.demoModeEnabled {
+            TextField("0", text: .constant("48155"))
+              .textFieldStyle(.roundedBorder).frame(width: 90)
+              .disabled(true)
+          } else {
+            TextField("0", value: $draftPort, format: .number.grouping(.never))
+              .textFieldStyle(.roundedBorder).frame(width: 90)
+          }
         }
         Toggle(isOn: $discoveryDraft) {
           SettingLabel(
@@ -416,7 +455,7 @@ struct NetworkPane: View {
             draftType = s.serviceType
             discoveryDraft = s.discoveryEnabled
           }
-          .disabled(!dirty)
+          .disabled(!dirty || s.demoModeEnabled)
           Button("Apply & Restart Network") {
             s.deviceName = draftName
             s.listenPort = max(0, min(65535, draftPort))
@@ -425,7 +464,7 @@ struct NetworkPane: View {
             net.restart()
           }
           .keyboardShortcut(.defaultAction)
-          .disabled(!dirty)
+          .disabled(!dirty || s.demoModeEnabled)
         }
       } header: {
         Text("Identity & Discovery")
@@ -460,7 +499,10 @@ struct NetworkPane: View {
               "Shared secret mixed into the AES-256-GCM encryption key. Only Macs with the matching key can decrypt or authenticate commands.")
           Spacer()
           Group {
-            if revealKey {
+            if s.demoModeEnabled {
+              SecureField("••••••••••••", text: .constant("demo-secret-key"))
+                .disabled(true)
+            } else if revealKey {
               TextField("None", text: $s.pairingKey)
             } else {
               SecureField("None", text: $s.pairingKey)
@@ -473,6 +515,7 @@ struct NetworkPane: View {
             Image(systemName: revealKey ? "eye.slash" : "eye")
           }
           .buttonStyle(.borderless)
+          .disabled(s.demoModeEnabled)
         }
       }
 
@@ -551,7 +594,7 @@ struct NetworkPane: View {
                 Text(inc.timestamp, style: .time)
                   .font(.caption2).foregroundStyle(.secondary)
               }
-              Text(inc.executablePath)
+              Text(demo.sanitizePath(inc.executablePath))
                 .font(.caption2.monospaced())
                 .foregroundStyle(.secondary)
               Text("Remediation: \(inc.remediationSummary)")
@@ -662,6 +705,9 @@ struct ShortcutsPane: View {
         row(
           "Toggle Speakers Mute", "Mute or unmute the speakers independently",
           $s.hotkeyMuteSpeakers)
+        row(
+          "Toggle Demo Mode", "Hide or show personal info for screen recording",
+          $s.hotkeyDemoMode)
       }
       .disabled(!s.hotkeysEnabled)
       Section {

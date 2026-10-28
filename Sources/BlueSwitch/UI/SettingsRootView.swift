@@ -82,6 +82,7 @@ struct SettingsRootView: View {
   @ObservedObject private var nav = SettingsNavigation.shared
   @ObservedObject private var bt = BluetoothService.shared
   @ObservedObject private var net = NetworkService.shared
+  @ObservedObject private var demo = DemoMode.shared
 
   var body: some View {
     NavigationSplitView {
@@ -112,8 +113,18 @@ struct SettingsRootView: View {
         Image(systemName: "staroflife.fill").foregroundStyle(.white).font(.system(size: 16, weight: .bold))
       }
       VStack(alignment: .leading, spacing: 0) {
-        Text("BlueSwitch").font(.headline)
-        Text(bt.connectionState.label).font(.caption).foregroundStyle(bt.connectionState.color)
+        HStack(spacing: 5) {
+          Text("BlueSwitch").font(.headline)
+          if demo.isEnabled {
+            Text("DEMO")
+              .font(.system(size: 8, weight: .black))
+              .padding(.horizontal, 4).padding(.vertical, 1)
+              .background(Capsule().fill(Theme.amber))
+              .foregroundStyle(.black)
+          }
+        }
+        Text(demo.effectiveConnectionState.label).font(.caption)
+          .foregroundStyle(demo.effectiveConnectionState.color)
       }
     }
     .padding(.vertical, 6)
@@ -128,10 +139,10 @@ struct SettingsRootView: View {
         .background(RoundedRectangle(cornerRadius: 6, style: .continuous).fill(Theme.paneGradient(pane.tint)))
       Text(pane.title)
       Spacer()
-      if pane == .peripherals, !bt.peripherals.isEmpty {
-        badge("\(bt.peripherals.count)")
-      } else if pane == .devices, !net.peers.isEmpty {
-        badge("\(net.peers.count)")
+      if pane == .peripherals, !demo.effectivePeripherals.isEmpty {
+        badge("\(demo.effectivePeripherals.count)")
+      } else if pane == .devices, !demo.effectivePeers.isEmpty {
+        badge("\(demo.effectivePeers.count)")
       }
     }
   }

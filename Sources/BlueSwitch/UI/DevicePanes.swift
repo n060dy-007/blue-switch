@@ -6,21 +6,23 @@ struct PeripheralsPane: View {
   @ObservedObject private var bt = BluetoothService.shared
   @ObservedObject private var s = AppSettings.shared
   @ObservedObject private var clicker = BluetoothAutoClicker.shared
+  @ObservedObject private var demo = DemoMode.shared
   @State private var confirmRemoveAll = false
 
   var body: some View {
-    PaneContainer(pane: .peripherals) {
-      if !bt.isAuthorized {
+    let list = demo.effectivePeripherals
+    return PaneContainer(pane: .peripherals) {
+      if !bt.isAuthorized && !s.demoModeEnabled {
         Section {
           BluetoothPermissionBanner()
         }
       }
-      if s.autoAcceptBluetoothRequests && !clicker.isAccessibilityTrusted {
+      if s.autoAcceptBluetoothRequests && !clicker.isAccessibilityTrusted && !s.demoModeEnabled {
         Section {
           AccessibilityPermissionBanner()
         }
       }
-      if !bt.isPoweredOn {
+      if !bt.isPoweredOn && !s.demoModeEnabled {
         Section {
           Label("Bluetooth is turned off. Turn it on in Control Center.", systemImage: "exclamationmark.triangle.fill")
             .foregroundStyle(Theme.amber)
@@ -28,10 +30,10 @@ struct PeripheralsPane: View {
       }
 
       Section {
-        if bt.peripherals.isEmpty {
+        if list.isEmpty {
           EmptyStateRow(symbol: "keyboard", text: "No peripherals registered yet — add them from the list below.")
         } else {
-          ForEach(bt.peripherals) { p in
+          ForEach(list) { p in
             ManagedPeripheralRow(peripheral: p, tick: bt.refreshTick)
           }
           .onMove { bt.move(from: $0, to: $1) }
@@ -40,7 +42,7 @@ struct PeripheralsPane: View {
         HStack {
           Text("Switched Peripherals")
           Spacer()
-          if !bt.peripherals.isEmpty {
+          if !bt.peripherals.isEmpty && !s.demoModeEnabled {
             Button("Remove All", role: .destructive) { confirmRemoveAll = true }
               .buttonStyle(.borderless).font(.caption)
           }
@@ -58,8 +60,8 @@ struct PeripheralsPane: View {
             HStack(spacing: 10) {
               Image(systemName: p.symbolName).frame(width: 24).foregroundStyle(.secondary)
               VStack(alignment: .leading, spacing: 1) {
-                Text(p.name)
-                Text(p.id).font(.caption.monospaced()).foregroundStyle(.secondary)
+                Text(demo.peripheralDisplayName(p))
+                Text(demo.peripheralSubtitle(p)).font(.caption.monospaced()).foregroundStyle(.secondary)
               }
               Spacer()
               Button {
@@ -111,11 +113,12 @@ private struct ManagedPeripheralRow: View {
   let peripheral: BluetoothPeripheral
   let tick: Int
   @ObservedObject private var bt = BluetoothService.shared
+  @ObservedObject private var demo = DemoMode.shared
   @State private var editing = false
   @State private var alias = ""
 
   var body: some View {
-    let connected = bt.isConnected(peripheral)
+    let connected = demo.isPeripheralConnected(peripheral)
     let busy = bt.busyIDs.contains(peripheral.id)
     HStack(spacing: 12) {
       Image(systemName: peripheral.symbolName)
@@ -130,7 +133,7 @@ private struct ManagedPeripheralRow: View {
             .textFieldStyle(.roundedBorder).frame(maxWidth: 220)
         } else {
           HStack(spacing: 4) {
-            Text(peripheral.displayName).font(.body.weight(.medium))
+            Text(demo.peripheralDisplayName(peripheral)).font(.body.weight(.medium))
             Button {
               alias = peripheral.alias
               editing = true
@@ -140,7 +143,7 @@ private struct ManagedPeripheralRow: View {
             .buttonStyle(.borderless).foregroundStyle(.secondary).help("Rename")
           }
         }
-        Text(peripheral.alias.isEmpty ? peripheral.id : "\(peripheral.name) · \(peripheral.id)")
+        Text(demo.peripheralSubtitle(peripheral))
           .font(.caption.monospaced()).foregroundStyle(.secondary)
       }
 
@@ -189,23 +192,25 @@ struct DevicesPane: View {
   @ObservedObject private var bt = BluetoothService.shared
   @ObservedObject private var s = AppSettings.shared
   @ObservedObject private var updates = UpdateChecker.shared
+  @ObservedObject private var demo = DemoMode.shared
   @State private var manualName = ""
   @State private var manualHost = ""
   @State private var manualPort = ""
 
   var body: some View {
-    PaneContainer(pane: .devices) {
+    let peersList = demo.effectivePeers
+    return PaneContainer(pane: .devices) {
       Section {
-        if net.peers.isEmpty {
+        if peersList.isEmpty {
           EmptyStateRow(symbol: "desktopcomputer", text: "No Macs registered. Pick one from the discovered list below.")
         } else {
-          ForEach(net.peers) { peer in peerRow(peer) }
+          ForEach(peersList) { peer in peerRow(peer) }
         }
       } header: {
         HStack(spacing: 12) {
           Text("Registered Macs")
           Spacer()
-          if !net.peers.isEmpty {
+          if !peersList.isEmpty {
             Button {
               updates.pushUpdateToAllPeers()
             } label: {
@@ -238,8 +243,8 @@ struct DevicesPane: View {
             HStack(spacing: 10) {
               Image(systemName: "desktopcomputer").foregroundStyle(.secondary).frame(width: 24)
               VStack(alignment: .leading, spacing: 1) {
-                Text(peer.name)
-                Text(peer.host.isEmpty ? "Resolving…" : "\(peer.host):\(peer.port)")
+                Text(demo.peerDisplayName(peer))
+                Text(demo.peerAddressDisplay(peer))
                   .font(.caption.monospaced()).foregroundStyle(.secondary)
               }
               Spacer()
@@ -279,15 +284,19 @@ struct DevicesPane: View {
   }
 
   private func peerRow(_ peer: PeerDevice) -> some View {
-    let reach = net.reachability[peer.id] ?? .unknown
-    let isTarget = net.activePeer?.id == peer.id
+    let reach = demo.reachability(for: peer)
+    let isTarget = demo.effectiveActivePeer?.id == peer.id
     let outdated = updates.isPeerOutdated(peer)
     let isUpdating = updates.updatingPeerIDs.contains(peer.id)
     let supportsOTA = AppInfo.supportsNativeOTAUpdate(version: peer.appVersion)
     return VStack(alignment: .leading, spacing: 4) {
       HStack(spacing: 12) {
         Button {
-          net.setActive(peer)
+          if demo.isSimulatingSwitch {
+            demo.activeDemoPeerID = peer.id
+          } else {
+            net.setActive(peer)
+          }
         } label: {
           Image(systemName: isTarget ? "largecircle.fill.circle" : "circle")
             .foregroundStyle(isTarget ? Theme.blue : .secondary)
@@ -304,7 +313,7 @@ struct DevicesPane: View {
 
         VStack(alignment: .leading, spacing: 2) {
           HStack(spacing: 6) {
-            Text(peer.name).font(.body.weight(.medium))
+            Text(demo.peerDisplayName(peer)).font(.body.weight(.medium))
             if isTarget {
               Text("TARGET").font(.system(size: 9, weight: .heavy))
                 .padding(.horizontal, 5).padding(.vertical, 1)
@@ -325,7 +334,7 @@ struct DevicesPane: View {
                 .background(Capsule().fill(Color.primary.opacity(0.1)))
             }
           }
-          Text(peer.host.isEmpty ? "Address not resolved yet" : "\(peer.host):\(peer.port)")
+          Text(demo.peerAddressDisplay(peer))
             .font(.caption.monospaced()).foregroundStyle(.secondary)
         }
 

@@ -95,8 +95,13 @@ final class StatusBarController: NSObject, NSMenuDelegate {
 
   private func buildMenu() -> NSMenu {
     let menu = NSMenu()
+    let demo = DemoMode.shared
 
-    let header = NSMenuItem(title: settings.effectiveDeviceName, action: nil, keyEquivalent: "")
+    let headerTitle =
+      settings.demoModeEnabled
+      ? "\(demo.localMacDisplayName) · DEMO MODE"
+      : settings.effectiveDeviceName
+    let header = NSMenuItem(title: headerTitle, action: nil, keyEquivalent: "")
     header.isEnabled = false
     menu.addItem(header)
     menu.addItem(.separator())
@@ -109,17 +114,19 @@ final class StatusBarController: NSObject, NSMenuDelegate {
     let macsHeader = NSMenuItem(title: "Target Mac", action: nil, keyEquivalent: "")
     macsHeader.isEnabled = false
     menu.addItem(macsHeader)
-    if net.peers.isEmpty {
+    let peersList = demo.effectivePeers
+    if peersList.isEmpty {
       let none = NSMenuItem(title: "No Macs registered", action: nil, keyEquivalent: "")
       none.isEnabled = false
       menu.addItem(none)
     }
-    for peer in net.peers {
-      let mi = NSMenuItem(title: peer.name, action: #selector(selectPeer(_:)), keyEquivalent: "")
+    for peer in peersList {
+      let mi = NSMenuItem(
+        title: demo.peerDisplayName(peer), action: #selector(selectPeer(_:)), keyEquivalent: "")
       mi.target = self
       mi.representedObject = peer.id
-      mi.state = net.activePeer?.id == peer.id ? .on : .off
-      let online = net.reachability[peer.id] == .online
+      mi.state = demo.effectiveActivePeer?.id == peer.id ? .on : .off
+      let online = demo.reachability(for: peer) == .online
       mi.image = NSImage(
         systemSymbolName: online ? "desktopcomputer" : "desktopcomputer.trianglebadge.exclamationmark",
         accessibilityDescription: nil)
@@ -130,15 +137,16 @@ final class StatusBarController: NSObject, NSMenuDelegate {
     let periHeader = NSMenuItem(title: "Peripherals", action: nil, keyEquivalent: "")
     periHeader.isEnabled = false
     menu.addItem(periHeader)
-    if bt.peripherals.isEmpty {
+    let periList = demo.effectivePeripherals
+    if periList.isEmpty {
       let none = NSMenuItem(title: "No peripherals registered", action: nil, keyEquivalent: "")
       none.isEnabled = false
       menu.addItem(none)
     }
-    for p in bt.peripherals {
-      let connected = bt.isConnected(p)
+    for p in periList {
+      let connected = demo.isPeripheralConnected(p)
       let mi = NSMenuItem(
-        title: "\(p.displayName) — \(connected ? "Connected" : "Not connected")",
+        title: "\(demo.peripheralDisplayName(p)) — \(connected ? "Connected" : "Not connected")",
         action: #selector(togglePeripheral(_:)), keyEquivalent: "")
       mi.target = self
       mi.representedObject = p.id
@@ -169,6 +177,15 @@ final class StatusBarController: NSObject, NSMenuDelegate {
     spkItem.state = audio.isSpeakersMuted ? .on : .off
     menu.addItem(spkItem)
     menu.addItem(.separator())
+
+    let demoItem = item(
+      settings.demoModeEnabled
+        ? "Disable Demo Mode (Personal Info Hidden)"
+        : "Enable Demo Mode (For Screen Recording)",
+      #selector(toggleDemoModeAction),
+      symbol: settings.demoModeEnabled ? "eye.slash.fill" : "video.badge.checkmark")
+    demoItem.state = settings.demoModeEnabled ? .on : .off
+    menu.addItem(demoItem)
 
     menu.addItem(item("Open Dashboard", #selector(openDashboard), symbol: "rectangle.grid.2x2"))
     let s = item("Settings…", #selector(openSettingsAction), symbol: "gearshape")
@@ -204,6 +221,7 @@ final class StatusBarController: NSObject, NSMenuDelegate {
   @objc private func doTake() { coordinator.takeFromPeer() }
   @objc private func toggleMicMuteAction() { AudioService.shared.toggleMicMute() }
   @objc private func toggleSpeakersMuteAction() { AudioService.shared.toggleSpeakersMute() }
+  @objc private func toggleDemoModeAction() { DemoMode.shared.toggle() }
   @objc private func openDashboard() {
     DispatchQueue.main.async { self.togglePopover() }
   }

@@ -12,6 +12,7 @@ struct DashboardView: View {
   @ObservedObject private var updates = UpdateChecker.shared
   @ObservedObject private var sec = SecurityMonitor.shared
   @ObservedObject private var audio = AudioService.shared
+  @ObservedObject private var demo = DemoMode.shared
 
   var body: some View {
     VStack(spacing: 0) {
@@ -174,11 +175,35 @@ struct DashboardView: View {
       Circle().fill(.white.opacity(0.15)).frame(width: 160).offset(x: 230, y: -60).blur(radius: 2)
       HStack(alignment: .center) {
         VStack(alignment: .leading, spacing: 2) {
-          Text("BlueSwitch").font(.title2.weight(.heavy)).foregroundStyle(.white)
-          Text(settings.effectiveDeviceName).font(.caption).foregroundStyle(.white.opacity(0.85))
+          HStack(spacing: 6) {
+            Text("BlueSwitch").font(.title2.weight(.heavy)).foregroundStyle(.white)
+            if settings.demoModeEnabled {
+              Text("DEMO")
+                .font(.system(size: 9, weight: .black))
+                .padding(.horizontal, 6).padding(.vertical, 2)
+                .background(Capsule().fill(Color.black.opacity(0.35)))
+                .foregroundStyle(.white)
+            }
+          }
+          Text(demo.localMacDisplayName).font(.caption).foregroundStyle(.white.opacity(0.85))
         }
         Spacer()
-        let state = bt.connectionState
+        Button {
+          demo.toggle()
+        } label: {
+          Image(systemName: settings.demoModeEnabled ? "eye.slash.fill" : "eye")
+            .font(.caption.weight(.bold))
+            .padding(6)
+            .background(Circle().fill(.white.opacity(settings.demoModeEnabled ? 0.32 : 0.16)))
+            .foregroundStyle(.white)
+        }
+        .buttonStyle(.plain)
+        .help(
+          settings.demoModeEnabled
+            ? "Demo Mode ON (Personal info hidden) — click to disable"
+            : "Enable Demo Mode for public screen recording")
+
+        let state = demo.effectiveConnectionState
         Text(state.label)
           .font(.caption.weight(.bold))
           .padding(.horizontal, 10).padding(.vertical, 5)
@@ -194,17 +219,20 @@ struct DashboardView: View {
   // MARK: Switch card
 
   private var switchCard: some View {
-    Card {
+    let connState = demo.effectiveConnectionState
+    let activePeer = demo.effectiveActivePeer
+    return Card {
       VStack(spacing: 14) {
         HStack(spacing: 0) {
           macBadge(
-            name: "This Mac", subtitle: settings.effectiveDeviceName,
-            active: bt.connectionState == .allConnected)
+            name: "This Mac", subtitle: demo.localMacDisplayName,
+            active: connState == .allConnected)
           FlowArrows(direction: arrowDirection, animating: coordinator.phase.isWorking)
             .frame(width: 70)
           macBadge(
-            name: net.activePeer?.name ?? "No peer", subtitle: peerSubtitle,
-            active: bt.connectionState == .allDisconnected && net.activePeer != nil)
+            name: activePeer.map { demo.peerDisplayName($0) } ?? "No peer",
+            subtitle: peerSubtitle,
+            active: connState == .allDisconnected && activePeer != nil)
         }
 
         peerPicker
@@ -220,7 +248,7 @@ struct DashboardView: View {
           }
         }
         .buttonStyle(GradientButtonStyle())
-        .disabled(coordinator.phase.isWorking || net.activePeer == nil)
+        .disabled(coordinator.phase.isWorking || activePeer == nil)
         .keyboardShortcut(.defaultAction)
 
         HStack(spacing: 8) {
@@ -237,7 +265,7 @@ struct DashboardView: View {
           }
           .buttonStyle(PillButtonStyle(tint: Theme.blue))
         }
-        .disabled(coordinator.phase.isWorking || net.activePeer == nil)
+        .disabled(coordinator.phase.isWorking || activePeer == nil)
 
         phaseMessage
       }
@@ -245,7 +273,7 @@ struct DashboardView: View {
   }
 
   private var arrowDirection: FlowArrows.Direction {
-    switch bt.connectionState {
+    switch demo.effectiveConnectionState {
     case .allConnected: return .right
     case .allDisconnected: return .left
     default: return .both
@@ -253,8 +281,8 @@ struct DashboardView: View {
   }
 
   private var peerSubtitle: String {
-    guard let p = net.activePeer else { return "Add in Settings" }
-    return (net.reachability[p.id] ?? .unknown).label
+    guard let p = demo.effectiveActivePeer else { return "Add in Settings" }
+    return demo.reachability(for: p).label
   }
 
   private func macBadge(name: String, subtitle: String, active: Bool) -> some View {
@@ -276,18 +304,25 @@ struct DashboardView: View {
   }
 
   @ViewBuilder private var peerPicker: some View {
-    if net.peers.count > 1 {
+    let peersList = demo.effectivePeers
+    if peersList.count > 1 {
       Picker(
         "Target",
         selection: Binding(
-          get: { net.activePeer?.id ?? "" },
-          set: { id in if let p = net.peers.first(where: { $0.id == id }) { net.setActive(p) } })
+          get: { demo.effectiveActivePeer?.id ?? "" },
+          set: { id in
+            if demo.isSimulatingSwitch {
+              demo.activeDemoPeerID = id
+            } else if let p = net.peers.first(where: { $0.id == id }) {
+              net.setActive(p)
+            }
+          })
       ) {
-        ForEach(net.peers) { p in Text(p.name).tag(p.id) }
+        ForEach(peersList) { p in Text(demo.peerDisplayName(p)).tag(p.id) }
       }
       .pickerStyle(.menu)
       .controlSize(.small)
-    } else if net.peers.isEmpty {
+    } else if peersList.isEmpty {
       Button("Register another Mac…") { openSettings(.devices) }
         .buttonStyle(.link)
         .font(.caption)
@@ -299,12 +334,13 @@ struct DashboardView: View {
     case .idle:
       EmptyView()
     case .working(let m):
-      Text(m).font(.caption).foregroundStyle(.secondary).transition(.opacity)
+      Text(demo.sanitizeLog(m)).font(.caption).foregroundStyle(.secondary).transition(.opacity)
     case .success(let m):
-      Label(m, systemImage: "checkmark.circle.fill").font(.caption).foregroundStyle(Theme.green)
+      Label(demo.sanitizeLog(m), systemImage: "checkmark.circle.fill").font(.caption)
+        .foregroundStyle(Theme.green)
         .transition(.opacity)
     case .failure(let m):
-      Label(m, systemImage: "exclamationmark.triangle.fill").font(.caption)
+      Label(demo.sanitizeLog(m), systemImage: "exclamationmark.triangle.fill").font(.caption)
         .foregroundStyle(Theme.red).multilineTextAlignment(.leading)
         .fixedSize(horizontal: false, vertical: true)
         .transition(.opacity)
@@ -314,7 +350,8 @@ struct DashboardView: View {
   // MARK: Peripherals
 
   private var peripheralsCard: some View {
-    Card {
+    let list = demo.effectivePeripherals
+    return Card {
       VStack(alignment: .leading, spacing: 10) {
         HStack {
           Text("Peripherals").font(.headline)
@@ -327,12 +364,12 @@ struct DashboardView: View {
           .buttonStyle(.borderless)
           .help("Refresh")
         }
-        if bt.peripherals.isEmpty {
+        if list.isEmpty {
           EmptyStateRow(symbol: "keyboard", text: "No peripherals yet")
           Button("Add your Magic Keyboard & Trackpad…") { openSettings(.peripherals) }
             .buttonStyle(.link).font(.caption)
         } else {
-          ForEach(bt.peripherals) { p in
+          ForEach(list) { p in
             PeripheralMiniRow(peripheral: p, tick: bt.refreshTick)
           }
         }
@@ -376,9 +413,10 @@ private struct PeripheralMiniRow: View {
   let peripheral: BluetoothPeripheral
   let tick: Int
   @ObservedObject private var bt = BluetoothService.shared
+  @ObservedObject private var demo = DemoMode.shared
 
   var body: some View {
-    let connected = bt.isConnected(peripheral)
+    let connected = demo.isPeripheralConnected(peripheral)
     let busy = bt.busyIDs.contains(peripheral.id)
     HStack(spacing: 10) {
       Image(systemName: peripheral.symbolName)
@@ -389,7 +427,7 @@ private struct PeripheralMiniRow: View {
         )
         .foregroundStyle(connected ? Theme.blue : .secondary)
       VStack(alignment: .leading, spacing: 1) {
-        Text(peripheral.displayName).font(.callout.weight(.medium)).lineLimit(1)
+        Text(demo.peripheralDisplayName(peripheral)).font(.callout.weight(.medium)).lineLimit(1)
         Text(peripheral.isEnabled ? (connected ? "Connected" : "Not connected") : "Excluded from switching")
           .font(.caption2).foregroundStyle(.secondary)
       }

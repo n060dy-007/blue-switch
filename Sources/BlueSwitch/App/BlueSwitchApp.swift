@@ -40,6 +40,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       case .takeFromPeer: SwitchCoordinator.shared.takeFromPeer()
       case .muteMic: AudioService.shared.toggleMicMute()
       case .muteSpeakers: AudioService.shared.toggleSpeakersMute()
+      case .toggleDemoMode: DemoMode.shared.toggle()
       }
     }
     HotKeyManager.shared.reload()
@@ -106,9 +107,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       settings.$hotkeySendToPeer.map { _ in () }.eraseToAnyPublisher(),
       settings.$hotkeyTakeFromPeer.map { _ in () }.eraseToAnyPublisher(),
       settings.$hotkeyMuteMic.map { _ in () }.eraseToAnyPublisher(),
-      settings.$hotkeyMuteSpeakers.map { _ in () }.eraseToAnyPublisher()
+      settings.$hotkeyMuteSpeakers.map { _ in () }.eraseToAnyPublisher(),
+      settings.$hotkeyDemoMode.map { _ in () }.eraseToAnyPublisher()
     )
-    .dropFirst(6)
+    .dropFirst(7)
     .receive(on: DispatchQueue.main)
     .sink { HotKeyManager.shared.reload() }
     .store(in: &cancellables)
