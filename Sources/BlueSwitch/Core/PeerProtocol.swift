@@ -355,10 +355,10 @@ final class PeerRequest {
 
 enum AppInfo {
   static var version: String {
-    Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0.5"
+    Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0.6"
   }
   static var build: String {
-    Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "6"
+    Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "7"
   }
 
   /// Compares two version strings (`"1.0.3"` vs `"1.0.2"`) and optional build numbers.

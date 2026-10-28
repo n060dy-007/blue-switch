@@ -7,7 +7,9 @@ struct PeripheralsPane: View {
   @ObservedObject private var s = AppSettings.shared
   @ObservedObject private var clicker = BluetoothAutoClicker.shared
   @ObservedObject private var demo = DemoMode.shared
+  @ObservedObject private var diag = BluetoothDiagnosticsService.shared
   @State private var confirmRemoveAll = false
+  @State private var lastDeviceTestBanner: String? = nil
 
   var body: some View {
     let list = demo.effectivePeripherals
@@ -34,9 +36,23 @@ struct PeripheralsPane: View {
           EmptyStateRow(symbol: "keyboard", text: "No peripherals registered yet — add them from the list below.")
         } else {
           ForEach(list) { p in
-            ManagedPeripheralRow(peripheral: p, tick: bt.refreshTick)
+            ManagedPeripheralRow(
+              peripheral: p,
+              tick: bt.refreshTick,
+              onTestComplete: { msg in lastDeviceTestBanner = msg }
+            )
           }
           .onMove { bt.move(from: $0, to: $1) }
+        }
+        if let banner = lastDeviceTestBanner {
+          HStack(spacing: 8) {
+            Image(systemName: "checkmark.seal.fill").foregroundStyle(Theme.green)
+            Text(banner).font(.caption)
+            Spacer()
+            Button("Dismiss") { lastDeviceTestBanner = nil }
+              .buttonStyle(.borderless).font(.caption2)
+          }
+          .padding(.vertical, 2)
         }
       } header: {
         HStack {
@@ -87,6 +103,189 @@ struct PeripheralsPane: View {
         }
       }
 
+      // MARK: Bluetooth Testing & Diagnostics Suite
+      Section {
+        HStack(spacing: 10) {
+          Button {
+            diag.runFullDiagnosticSuite()
+          } label: {
+            Label(
+              diag.isRunningDiagnostics
+                ? "Running Bluetooth Diagnostics…"
+                : "Run Full Diagnostic & Security Test",
+              systemImage: "stethoscope"
+            )
+          }
+          .buttonStyle(.borderedProminent)
+          .disabled(diag.isRunningDiagnostics)
+
+          if !list.isEmpty {
+            Button {
+              for p in list {
+                diag.testPeripheral(p) { _, msg in
+                  lastDeviceTestBanner = msg
+                }
+              }
+            } label: {
+              Label("Test All Peripherals", systemImage: "bolt.horizontal.circle")
+            }
+            .disabled(diag.isRunningDiagnostics)
+          }
+
+          Spacer()
+
+          Text(diag.lastDiagnosticSummary)
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        }
+
+        if !diag.diagnosticSteps.isEmpty {
+          ForEach(diag.diagnosticSteps) { step in
+            HStack(alignment: .top, spacing: 10) {
+              Image(systemName: step.status.symbol)
+                .foregroundStyle(step.status.color)
+                .frame(width: 18)
+              VStack(alignment: .leading, spacing: 2) {
+                HStack {
+                  Text(step.title).font(.callout.weight(.semibold))
+                  Spacer()
+                  if let ms = step.durationMs {
+                    Text("\(ms) ms").font(.caption2.monospacedDigit()).foregroundStyle(.secondary)
+                  }
+                  StatusPill(
+                    text: step.status.rawValue,
+                    color: step.status.color,
+                    pulsing: step.status == .running
+                  )
+                }
+                Text(step.detail)
+                  .font(.caption)
+                  .foregroundStyle(.secondary)
+              }
+            }
+            .padding(.vertical, 2)
+          }
+        }
+      } header: {
+        Text("Bluetooth Testing & Diagnostics")
+      } footer: {
+        Text("Verifies Bluetooth radio power, privacy authorization, peripheral RSSI signal quality, link-key encryption, and switching readiness.")
+          .font(.caption).foregroundStyle(.secondary)
+      }
+
+      // MARK: Bluetooth Reliability & Self-Healing
+      Section("Bluetooth Reliability & Auto-Heal") {
+        SettingToggle(
+          title: "Auto-heal unexpectedly dropped peripherals",
+          caption:
+            "Automatically reconnects managed peripherals if they drop due to wireless interference while this Mac owns them.",
+          isOn: $s.btAutoHealEnabled
+        )
+        SettingSlider(
+          title: "Auto-heal watchdog interval",
+          caption: "How often BlueSwitch checks for dropped local peripherals.",
+          value: $s.btAutoHealInterval,
+          range: 3...30,
+          step: 1
+        )
+        .disabled(!s.btAutoHealEnabled)
+        .onChange(of: s.btAutoHealInterval) { _ in
+          diag.scheduleWatchdog()
+        }
+        SettingToggle(
+          title: "Adaptive retry backoff & stale link-key recovery",
+          caption:
+            "Spaces out consecutive HCI page attempts by 1.3× and clears stale macOS link keys automatically when a peripheral was re-paired on another Mac.",
+          isOn: $s.btAdaptiveBackoff
+        )
+        HStack(spacing: 10) {
+          Button {
+            bt.resetStuckPairingSessions()
+          } label: {
+            Label("Reset Stuck Pairing Sessions", systemImage: "arrow.triangle.2.circlepath")
+          }
+          Button {
+            diag.resetReliabilityStats()
+          } label: {
+            Label("Clear Reliability Stats", systemImage: "chart.bar.xaxis")
+          }
+          Spacer()
+          Text("Session auto-heals: \(diag.totalAutoHealsSession)")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        }
+      }
+
+      // MARK: Bluetooth Security Information & Threat Protection
+      Section("Bluetooth Controller & Link Security Information") {
+        HStack {
+          Text("Controller Security Posture")
+          Spacer()
+          StatusPill(
+            text: diag.controllerInfo.securityPostureLabel,
+            color: diag.controllerInfo.securityPostureColor
+          )
+        }
+        btInfoRow("Local Host Controller MAC", diag.controllerInfo.displayAddress)
+        btInfoRow(
+          "Radio & Discoverability",
+          (s.demoModeEnabled || diag.controllerInfo.isPoweredOn ? "Powered On" : "Powered Off")
+            + " · "
+            + (diag.controllerInfo.isDiscoverable ? "Discoverable" : "Hidden (Non-Discoverable)")
+            + " · CoD \(diag.controllerInfo.classOfDeviceHex)"
+        )
+        btInfoRow(
+          "Active HID Links",
+          "\(s.demoModeEnabled ? list.filter { demo.isPeripheralConnected($0) }.count : diag.controllerInfo.connectedHIDCount) connected · "
+            + "\((s.demoModeEnabled ? 0 : diag.controllerInfo.unencryptedActiveCount) == 0 ? "100% Link-Key / AES Encrypted" : "\(diag.controllerInfo.unencryptedActiveCount) Unencrypted")"
+        )
+
+        SettingToggle(
+          title: "Audit & alert on unencrypted Bluetooth HID links",
+          caption:
+            "Logs a security warning if any connected keyboard, mouse, or trackpad operates without link-layer encryption.",
+          isOn: $s.btRequireEncryptedLink
+        )
+        SettingToggle(
+          title: "Block unsolicited unpaired incoming HID connections (Anti-Keystroke Injection)",
+          caption:
+            "Immediately disconnects and alerts on unknown unpaired Bluetooth HID devices attempting to inject keystrokes or mouse events (BlueDucky defense).",
+          isOn: $s.btBlockUnsolicitedHID
+        )
+
+        if !list.isEmpty {
+          ForEach(list) { p in
+            let t = diag.telemetry(for: p)
+            VStack(alignment: .leading, spacing: 4) {
+              HStack {
+                Label(demo.peripheralDisplayName(p), systemImage: p.symbolName)
+                  .font(.callout.weight(.semibold))
+                Spacer()
+                HStack(spacing: 6) {
+                  Image(systemName: t.isLinkEncrypted ? "lock.shield.fill" : "shield.lefthalf.filled")
+                    .foregroundStyle(t.encryptionColor)
+                  Text(t.encryptionBadgeText)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(t.encryptionColor)
+                }
+              }
+              HStack(spacing: 12) {
+                Text("Class: \(t.deviceClassDescription)")
+                Text("·")
+                Text("Vendor: \(t.vendorName)")
+                Text("·")
+                Text("Signal: \(t.rssiDisplay)")
+                Text("·")
+                Text("Origin: \(t.connectionDirectionLabel)")
+              }
+              .font(.caption2)
+              .foregroundStyle(.secondary)
+            }
+            .padding(.vertical, 3)
+          }
+        }
+      }
+
       Section("Pairing tips for Magic Keyboard & Trackpad (USB-C)") {
         tip("cable.connector", "First-time pairing: plug the device into this Mac with its USB-C cable for a few seconds, then unplug. It will appear above.")
         tip("desktopcomputer", "Pair each device with both Macs once, then add the same devices on both Macs (or use Macs → Sync).")
@@ -96,6 +295,7 @@ struct PeripheralsPane: View {
     .onAppear {
       bt.refresh()
       clicker.refreshPermission()
+      diag.refreshTelemetry()
     }
     .confirmationDialog("Remove all peripherals from BlueSwitch?", isPresented: $confirmRemoveAll) {
       Button("Remove All", role: .destructive) { bt.removeAll() }
@@ -107,74 +307,119 @@ struct PeripheralsPane: View {
   private func tip(_ symbol: String, _ text: String) -> some View {
     Label { Text(text).font(.callout) } icon: { Image(systemName: symbol).foregroundStyle(Theme.blue) }
   }
+
+  private func btInfoRow(_ title: String, _ value: String) -> some View {
+    HStack {
+      Text(title)
+      Spacer()
+      Text(value)
+        .font(.callout.monospaced())
+        .foregroundStyle(.secondary)
+        .textSelection(.enabled)
+    }
+  }
 }
 
 private struct ManagedPeripheralRow: View {
   let peripheral: BluetoothPeripheral
   let tick: Int
+  var onTestComplete: ((String) -> Void)? = nil
   @ObservedObject private var bt = BluetoothService.shared
   @ObservedObject private var demo = DemoMode.shared
+  @ObservedObject private var diag = BluetoothDiagnosticsService.shared
   @State private var editing = false
   @State private var alias = ""
 
   var body: some View {
     let connected = demo.isPeripheralConnected(peripheral)
     let busy = bt.busyIDs.contains(peripheral.id)
-    HStack(spacing: 12) {
-      Image(systemName: peripheral.symbolName)
-        .font(.system(size: 16, weight: .semibold))
-        .frame(width: 34, height: 34)
-        .background(RoundedRectangle(cornerRadius: 9).fill(connected ? Theme.blue.opacity(0.15) : Color.primary.opacity(0.06)))
-        .foregroundStyle(connected ? Theme.blue : .secondary)
+    let testing = diag.testingPeripheralIDs.contains(peripheral.id)
+    let t = diag.telemetry(for: peripheral)
 
-      VStack(alignment: .leading, spacing: 2) {
-        if editing {
-          TextField(peripheral.name, text: $alias, onCommit: commit)
-            .textFieldStyle(.roundedBorder).frame(maxWidth: 220)
-        } else {
-          HStack(spacing: 4) {
-            Text(demo.peripheralDisplayName(peripheral)).font(.body.weight(.medium))
-            Button {
-              alias = peripheral.alias
-              editing = true
-            } label: {
-              Image(systemName: "pencil").font(.caption)
+    VStack(alignment: .leading, spacing: 6) {
+      HStack(spacing: 12) {
+        Image(systemName: peripheral.symbolName)
+          .font(.system(size: 16, weight: .semibold))
+          .frame(width: 34, height: 34)
+          .background(RoundedRectangle(cornerRadius: 9).fill(connected ? Theme.blue.opacity(0.15) : Color.primary.opacity(0.06)))
+          .foregroundStyle(connected ? Theme.blue : .secondary)
+
+        VStack(alignment: .leading, spacing: 2) {
+          if editing {
+            TextField(peripheral.name, text: $alias, onCommit: commit)
+              .textFieldStyle(.roundedBorder).frame(maxWidth: 220)
+          } else {
+            HStack(spacing: 4) {
+              Text(demo.peripheralDisplayName(peripheral)).font(.body.weight(.medium))
+              Button {
+                alias = peripheral.alias
+                editing = true
+              } label: {
+                Image(systemName: "pencil").font(.caption)
+              }
+              .buttonStyle(.borderless).foregroundStyle(.secondary).help("Rename")
             }
-            .buttonStyle(.borderless).foregroundStyle(.secondary).help("Rename")
+          }
+          HStack(spacing: 6) {
+            Text(demo.peripheralSubtitle(peripheral))
+              .font(.caption.monospaced()).foregroundStyle(.secondary)
+            Text("·").foregroundStyle(.tertiary)
+            Label(t.encryptionBadgeText, systemImage: t.isLinkEncrypted ? "lock.fill" : "lock.slash")
+              .font(.caption2.weight(.medium))
+              .foregroundStyle(t.encryptionColor)
+            if let rssi = t.rssi, connected {
+              Text("·").foregroundStyle(.tertiary)
+              Text("\(rssi) dBm")
+                .font(.caption2.monospacedDigit())
+                .foregroundStyle(t.signalQuality.color)
+            }
+            if let avgMs = t.stats.averageLatencyMs {
+              Text("·").foregroundStyle(.tertiary)
+              Text("\(t.stats.reliabilityPercent)% (\(avgMs) ms)")
+                .font(.caption2.monospacedDigit())
+                .foregroundStyle(.secondary)
+            }
           }
         }
-        Text(demo.peripheralSubtitle(peripheral))
-          .font(.caption.monospaced()).foregroundStyle(.secondary)
+
+        Spacer()
+
+        StatusPill(
+          text: busy ? "Connecting" : (testing ? "Testing" : (connected ? "Connected" : "Disconnected")),
+          color: (busy || testing) ? Theme.amber : (connected ? Theme.green : .secondary),
+          pulsing: busy || testing)
+
+        Toggle("", isOn: Binding(
+          get: { peripheral.isEnabled },
+          set: { v in var p = peripheral; p.isEnabled = v; bt.update(p) }))
+          .toggleStyle(.switch).labelsHidden().controlSize(.small)
+          .help("Include in switching")
+
+        Button("Test") {
+          diag.testPeripheral(peripheral) { _, summary in
+            onTestComplete?(summary)
+          }
+        }
+        .controlSize(.small)
+        .disabled(busy || testing)
+        .help("Test Bluetooth link quality, encryption, and connection latency")
+
+        Button(connected ? "Release" : "Connect") {
+          connected ? bt.release(peripheral) : bt.connect(peripheral)
+        }
+        .disabled(busy || testing)
+        .help(connected ? "Release from this Mac (upstream: Remove from PC)" : "Connect to this Mac")
+
+        Button {
+          withAnimation { bt.remove(peripheral) }
+        } label: {
+          Image(systemName: "minus.circle.fill").foregroundStyle(Theme.red)
+        }
+        .buttonStyle(.borderless)
+        .help("Remove from BlueSwitch")
       }
-
-      Spacer()
-
-      StatusPill(
-        text: busy ? "Connecting" : (connected ? "Connected" : "Disconnected"),
-        color: busy ? Theme.amber : (connected ? Theme.green : .secondary),
-        pulsing: busy)
-
-      Toggle("", isOn: Binding(
-        get: { peripheral.isEnabled },
-        set: { v in var p = peripheral; p.isEnabled = v; bt.update(p) }))
-        .toggleStyle(.switch).labelsHidden().controlSize(.small)
-        .help("Include in switching")
-
-      Button(connected ? "Release" : "Connect") {
-        connected ? bt.release(peripheral) : bt.connect(peripheral)
-      }
-      .disabled(busy)
-      .help(connected ? "Release from this Mac (upstream: Remove from PC)" : "Connect to this Mac")
-
-      Button {
-        withAnimation { bt.remove(peripheral) }
-      } label: {
-        Image(systemName: "minus.circle.fill").foregroundStyle(Theme.red)
-      }
-      .buttonStyle(.borderless)
-      .help("Remove from BlueSwitch")
     }
-    .padding(.vertical, 2)
+    .padding(.vertical, 3)
   }
 
   private func commit() {

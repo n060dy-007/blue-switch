@@ -150,6 +150,8 @@ final class AppSettings: ObservableObject {
     case partialStateBehavior, autoSyncPeripherals, reclaimOnLaunch
     case releaseOnSleep, reclaimOnWake
     case muteMicOnRelease, unmuteMicOnConnect, muteSpeakersOnRelease, unmuteSpeakersOnConnect
+    case btAutoHealEnabled, btAutoHealInterval, btAdaptiveBackoff
+    case btRequireEncryptedLink, btBlockUnsolicitedHID
     // Network & Security
     case deviceName, listenPort, serviceType, healthCheckTimeout
     case commandTimeout, discoveryEnabled, pairingKey, activePeerID
@@ -291,6 +293,21 @@ final class AppSettings: ObservableObject {
   }
   @Published var unmuteSpeakersOnConnect: Bool = AppSettings.load(.unmuteSpeakersOnConnect, false) {
     didSet { Self.save(.unmuteSpeakersOnConnect, unmuteSpeakersOnConnect) }
+  }
+  @Published var btAutoHealEnabled: Bool = AppSettings.load(.btAutoHealEnabled, true) {
+    didSet { Self.save(.btAutoHealEnabled, btAutoHealEnabled) }
+  }
+  @Published var btAutoHealInterval: Double = AppSettings.load(.btAutoHealInterval, 10.0) {
+    didSet { Self.save(.btAutoHealInterval, btAutoHealInterval) }
+  }
+  @Published var btAdaptiveBackoff: Bool = AppSettings.load(.btAdaptiveBackoff, true) {
+    didSet { Self.save(.btAdaptiveBackoff, btAdaptiveBackoff) }
+  }
+  @Published var btRequireEncryptedLink: Bool = AppSettings.load(.btRequireEncryptedLink, true) {
+    didSet { Self.save(.btRequireEncryptedLink, btRequireEncryptedLink) }
+  }
+  @Published var btBlockUnsolicitedHID: Bool = AppSettings.load(.btBlockUnsolicitedHID, true) {
+    didSet { Self.save(.btBlockUnsolicitedHID, btBlockUnsolicitedHID) }
   }
 
   // MARK: Network
@@ -458,6 +475,8 @@ final class AppSettings: ObservableObject {
     releaseOnSleep = false; reclaimOnWake = false
     muteMicOnRelease = false; unmuteMicOnConnect = false
     muteSpeakersOnRelease = false; unmuteSpeakersOnConnect = false
+    btAutoHealEnabled = true; btAutoHealInterval = 10.0; btAdaptiveBackoff = true
+    btRequireEncryptedLink = true; btBlockUnsolicitedHID = true
     deviceName = ""; listenPort = 0; serviceType = "_blueswitch._tcp"; healthCheckTimeout = 5
     commandTimeout = 10; discoveryEnabled = true; pairingKey = ""
     encryptNetworkTraffic = true; requireEncryptedConnections = true

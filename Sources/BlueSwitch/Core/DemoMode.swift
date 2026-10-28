@@ -246,3 +246,4 @@ final class DemoMode: ObservableObject {
     return name
   }
 }
+

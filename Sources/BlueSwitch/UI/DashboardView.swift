@@ -13,6 +13,7 @@ struct DashboardView: View {
   @ObservedObject private var sec = SecurityMonitor.shared
   @ObservedObject private var audio = AudioService.shared
   @ObservedObject private var demo = DemoMode.shared
+  @ObservedObject private var btDiag = BluetoothDiagnosticsService.shared
 
   var body: some View {
     VStack(spacing: 0) {
@@ -353,9 +354,26 @@ struct DashboardView: View {
     let list = demo.effectivePeripherals
     return Card {
       VStack(alignment: .leading, spacing: 10) {
-        HStack {
+        HStack(spacing: 8) {
           Text("Peripherals").font(.headline)
+          if settings.btAutoHealEnabled {
+            Text("AUTO-HEAL")
+              .font(.system(size: 8, weight: .bold))
+              .padding(.horizontal, 5).padding(.vertical, 2)
+              .background(Capsule().fill(Theme.green.opacity(0.15)))
+              .foregroundStyle(Theme.green)
+              .help("Automatically reconnects unexpectedly dropped peripherals")
+          }
           Spacer()
+          Button {
+            btDiag.runFullDiagnosticSuite()
+            openSettings(.peripherals)
+          } label: {
+            Label("Test & Security", systemImage: "stethoscope")
+              .font(.caption)
+          }
+          .buttonStyle(.borderless)
+          .help("Run Bluetooth Diagnostic & Security Suite")
           Button {
             bt.refresh()
           } label: {
@@ -414,10 +432,12 @@ private struct PeripheralMiniRow: View {
   let tick: Int
   @ObservedObject private var bt = BluetoothService.shared
   @ObservedObject private var demo = DemoMode.shared
+  @ObservedObject private var diag = BluetoothDiagnosticsService.shared
 
   var body: some View {
     let connected = demo.isPeripheralConnected(peripheral)
-    let busy = bt.busyIDs.contains(peripheral.id)
+    let busy = bt.busyIDs.contains(peripheral.id) || diag.testingPeripheralIDs.contains(peripheral.id)
+    let t = diag.telemetry(for: peripheral)
     HStack(spacing: 10) {
       Image(systemName: peripheral.symbolName)
         .frame(width: 26, height: 26)
@@ -427,9 +447,31 @@ private struct PeripheralMiniRow: View {
         )
         .foregroundStyle(connected ? Theme.blue : .secondary)
       VStack(alignment: .leading, spacing: 1) {
-        Text(demo.peripheralDisplayName(peripheral)).font(.callout.weight(.medium)).lineLimit(1)
-        Text(peripheral.isEnabled ? (connected ? "Connected" : "Not connected") : "Excluded from switching")
-          .font(.caption2).foregroundStyle(.secondary)
+        HStack(spacing: 5) {
+          Text(demo.peripheralDisplayName(peripheral)).font(.callout.weight(.medium)).lineLimit(1)
+          Image(systemName: t.isLinkEncrypted ? "lock.fill" : "shield.lefthalf.filled")
+            .font(.system(size: 9))
+            .foregroundStyle(t.encryptionColor)
+            .help(t.encryptionBadgeText)
+        }
+        HStack(spacing: 5) {
+          Text(peripheral.isEnabled ? (connected ? "Connected" : "Standby") : "Excluded from switching")
+          if connected {
+            Text("·")
+            Text(t.encryptionBadgeText)
+              .foregroundStyle(t.encryptionColor)
+            if let rssi = t.rssi {
+              Text("·")
+              Text("\(rssi) dBm")
+                .foregroundStyle(t.signalQuality.color)
+            }
+          }
+          if let avgMs = t.stats.averageLatencyMs {
+            Text("·")
+            Text("\(t.stats.reliabilityPercent)% (\(avgMs) ms)")
+          }
+        }
+        .font(.caption2).foregroundStyle(.secondary).lineLimit(1)
       }
       Spacer()
       if busy {

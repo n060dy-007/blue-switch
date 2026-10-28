@@ -95,6 +95,33 @@ final class BluetoothService: NSObject, ObservableObject {
       [weak self] _ in
       self?.refreshStatusOnly()
     }
+    BluetoothDiagnosticsService.shared.start()
+  }
+
+  /// Clears any stuck in-flight pairing sessions and refreshes HCI & peripheral state.
+  func resetStuckPairingSessions() {
+    DispatchQueue.main.async {
+      let count = self.activePairs.count + self.busyIDs.count
+      for (id, pair) in self.activePairs {
+        pair.delegate = nil
+        if !(IOBluetoothDevice(addressString: id)?.isConnected() ?? false) {
+          pair.stop()
+        }
+      }
+      self.activePairs.removeAll()
+      self.pairSessions.removeAll()
+      self.busyIDs.removeAll()
+      self.refresh()
+      BluetoothDiagnosticsService.shared.refreshTelemetry()
+      Log.info(
+        "Cleared \(count) in-flight Bluetooth pairing session(s) and refreshed HCI telemetry",
+        "Bluetooth")
+      SecurityMonitor.shared.recordAudit(
+        category: "BluetoothReliability",
+        message: "Manual HCI pairing session reset completed (\(count) session(s) cleared)",
+        level: .info
+      )
+    }
   }
 
   func isConnected(_ p: BluetoothPeripheral) -> Bool {
@@ -136,6 +163,7 @@ final class BluetoothService: NSObject, ObservableObject {
       DispatchQueue.main.async {
         let managed = Set(self.peripherals.map(\.id))
         self.availablePeripherals = list.filter { !managed.contains($0.id) }
+        BluetoothDiagnosticsService.shared.refreshTelemetry()
       }
     }
   }
@@ -200,8 +228,12 @@ final class BluetoothService: NSObject, ObservableObject {
   // MARK: - Connect
 
   /// Connects a single peripheral to this Mac, retrying according to settings.
-  func connect(_ p: BluetoothPeripheral, completion: ((Bool) -> Void)? = nil) {
-    connectPeripherals([p]) { success, _ in
+  func connect(
+    _ p: BluetoothPeripheral,
+    isAutoHeal: Bool = false,
+    completion: ((Bool) -> Void)? = nil
+  ) {
+    connectPeripherals([p], isAutoHeal: isAutoHeal) { success, _ in
       completion?(success == 1)
     }
   }
@@ -214,11 +246,14 @@ final class BluetoothService: NSObject, ObservableObject {
       completion?(0, 0)
       return
     }
-    connectPeripherals(list, completion: completion)
+    BluetoothDiagnosticsService.shared.markClaimedLocally()
+    connectPeripherals(list, isAutoHeal: false, completion: completion)
   }
 
   private func connectPeripherals(
-    _ list: [BluetoothPeripheral], completion: ((Int, Int) -> Void)?
+    _ list: [BluetoothPeripheral],
+    isAutoHeal: Bool = false,
+    completion: ((Int, Int) -> Void)?
   ) {
     guard isPoweredOn || IOBluetoothHostController.default()?.powerState == kBluetoothHCIPowerStateON
     else {
@@ -250,6 +285,12 @@ final class BluetoothService: NSObject, ObservableObject {
         Thread.sleep(forTimeInterval: settle)
       }
 
+      var startTimes: [String: Date] = [:]
+      for p in list {
+        startTimes[p.id] = Date()
+      }
+      var recordedIDs: Set<String> = []
+
       // Round-robin passes across all requested peripherals so we never run two simultaneous
       // HCI page/pair operations and one slow/off device doesn't block the others for all retries.
       for pass in 1...attempts {
@@ -258,6 +299,13 @@ final class BluetoothService: NSObject, ObservableObject {
 
         for (idx, p) in pending.enumerated() {
           if self.isConnected(p) {
+            if !recordedIDs.contains(p.id) {
+              recordedIDs.insert(p.id)
+              let ms = Int(Date().timeIntervalSince(startTimes[p.id] ?? Date()) * 1000)
+              BluetoothDiagnosticsService.shared.recordConnectOutcome(
+                for: p, succeeded: true, latencyMs: max(10, ms), attemptsUsed: pass,
+                isAutoHeal: isAutoHeal)
+            }
             self.markFinished(p, connected: true)
             continue
           }
@@ -265,11 +313,18 @@ final class BluetoothService: NSObject, ObservableObject {
           let connected = self.performConnectPass(
             for: p, pass: pass, totalPasses: attempts, pairTimeout: pairTimeout)
           if connected {
-            let paired = IOBluetoothDevice(addressString: p.id)?.isPaired() ?? true
+            let dev = IOBluetoothDevice(addressString: p.id)
+            let paired = dev?.isPaired() ?? true
+            let encMode = BluetoothDiagnosticsService.queryEncryptionMode(dev)
+            let ms = Int(Date().timeIntervalSince(startTimes[p.id] ?? Date()) * 1000)
+            recordedIDs.insert(p.id)
+            BluetoothDiagnosticsService.shared.recordConnectOutcome(
+              for: p, succeeded: true, latencyMs: max(15, ms), attemptsUsed: pass,
+              isAutoHeal: isAutoHeal)
             SecurityMonitor.shared.recordAudit(
               category: "Bluetooth",
               message:
-                "Connected \(p.displayName) (\(p.id)) on attempt \(pass)/\(attempts) [Link Security: \(paired ? "Paired & Encrypted (Bluetooth Link Key)" : "Unpaired")]",
+                "Connected \(p.displayName) (\(p.id)) in \(ms) ms on attempt \(pass)/\(attempts) [Link Security: \(paired ? "Bonded & Encrypted (HCI Mode \(encMode))" : "Unpaired")]",
               level: .info
             )
             DispatchQueue.main.async {
@@ -290,7 +345,11 @@ final class BluetoothService: NSObject, ObservableObject {
         let stillPending = list.filter { !self.isConnected($0) }
         if stillPending.isEmpty { break }
         if pass < attempts {
-          Thread.sleep(forTimeInterval: retryDelay)
+          let effectiveDelay =
+            self.settings.btAdaptiveBackoff
+            ? retryDelay * pow(1.3, Double(pass - 1))
+            : retryDelay
+          Thread.sleep(forTimeInterval: min(6.0, effectiveDelay))
         }
       }
 
@@ -299,6 +358,12 @@ final class BluetoothService: NSObject, ObservableObject {
         for p in list {
           self.busyIDs.remove(p.id)
           if !self.isConnected(p) {
+            if !recordedIDs.contains(p.id) {
+              let ms = Int(Date().timeIntervalSince(startTimes[p.id] ?? Date()) * 1000)
+              BluetoothDiagnosticsService.shared.recordConnectOutcome(
+                for: p, succeeded: false, latencyMs: ms, attemptsUsed: attempts,
+                isAutoHeal: isAutoHeal)
+            }
             Log.error("Could not connect \(p.displayName) after \(attempts) attempt(s)", "Bluetooth")
           }
         }
@@ -462,6 +527,7 @@ final class BluetoothService: NSObject, ObservableObject {
 
   /// Releases a peripheral from this Mac so another Mac can claim it.
   func release(_ p: BluetoothPeripheral) {
+    BluetoothDiagnosticsService.shared.markIntentionallyReleased(cooldown: 25)
     BluetoothAutoClicker.shared.suppressAfterRelease(duration: 10)
     DispatchQueue.main.async {
       self.cleanupPairOnMain(for: p.id, stopIfRunning: true)
@@ -499,6 +565,7 @@ final class BluetoothService: NSObject, ObservableObject {
 
   /// Releases all enabled peripherals and waits until they are disconnected.
   func releaseAll(completion: @escaping (Bool) -> Void) {
+    BluetoothDiagnosticsService.shared.markIntentionallyReleased(cooldown: 30)
     BluetoothAutoClicker.shared.suppressAfterRelease(duration: 12)
     let list = enabledPeripherals
     list.forEach(release)
