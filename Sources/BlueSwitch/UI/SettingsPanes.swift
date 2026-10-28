@@ -126,6 +126,7 @@ struct GeneralPane: View {
 struct SwitchingPane: View {
   @ObservedObject private var s = AppSettings.shared
   @ObservedObject private var clicker = BluetoothAutoClicker.shared
+  @ObservedObject private var audio = AudioService.shared
 
   var body: some View {
     PaneContainer(pane: .switching) {
@@ -255,6 +256,64 @@ struct SwitchingPane: View {
           isOn: $s.requireInRange)
       }
 
+      Section("Audio Controls & Switch Automation (Microphone & Speakers)") {
+        HStack(spacing: 12) {
+          SettingLabel(
+            title: "Microphone (\(audio.inputDeviceName))",
+            caption: audio.isMicMuted ? "Currently MUTED" : "Input volume: \(audio.micVolume)%")
+          Spacer()
+          Slider(
+            value: Binding(
+              get: { Double(audio.micVolume) },
+              set: { audio.setMicVolume(Int($0)) }
+            ),
+            in: 0...100
+          )
+          .frame(width: 120)
+          Button(audio.isMicMuted ? "Unmute Mic" : "Mute Mic") {
+            audio.toggleMicMute()
+          }
+          .buttonStyle(.borderedProminent)
+          .tint(audio.isMicMuted ? Theme.red : Theme.indigo)
+        }
+        HStack(spacing: 12) {
+          SettingLabel(
+            title: "Speakers (\(audio.outputDeviceName))",
+            caption: audio.isSpeakersMuted
+              ? "Currently MUTED" : "Output volume: \(audio.speakersVolume)%")
+          Spacer()
+          Slider(
+            value: Binding(
+              get: { Double(audio.speakersVolume) },
+              set: { audio.setSpeakersVolume(Int($0)) }
+            ),
+            in: 0...100
+          )
+          .frame(width: 120)
+          Button(audio.isSpeakersMuted ? "Unmute Speakers" : "Mute Speakers") {
+            audio.toggleSpeakersMute()
+          }
+          .buttonStyle(.borderedProminent)
+          .tint(audio.isSpeakersMuted ? Theme.red : Theme.blue)
+        }
+        SettingToggle(
+          title: "Automatically mute Microphone when peripherals leave this Mac",
+          caption: "Mutes only the microphone on this Mac when you switch peripherals to another Mac.",
+          isOn: $s.muteMicOnRelease)
+        SettingToggle(
+          title: "Automatically unmute Microphone when peripherals connect here",
+          caption: "Restores your microphone volume when peripherals return to this Mac.",
+          isOn: $s.unmuteMicOnConnect)
+        SettingToggle(
+          title: "Automatically mute Speakers when peripherals leave this Mac",
+          caption: "Mutes only the speakers on this Mac when you switch peripherals to another Mac.",
+          isOn: $s.muteSpeakersOnRelease)
+        SettingToggle(
+          title: "Automatically unmute Speakers when peripherals connect here",
+          caption: "Unmutes your speakers when peripherals return to this Mac.",
+          isOn: $s.unmuteSpeakersOnConnect)
+      }
+
       Section("Automation") {
         SettingToggle(
           title: "Auto-sync peripheral list to target Mac",
@@ -269,7 +328,10 @@ struct SwitchingPane: View {
           isOn: $s.reclaimOnWake)
       }
     }
-    .onAppear { clicker.refreshPermission() }
+    .onAppear {
+      clicker.refreshPermission()
+      audio.refresh()
+    }
   }
 }
 
@@ -441,6 +503,13 @@ struct NetworkPane: View {
         )
         .disabled(!s.inputMonitoringGuardEnabled)
         SettingToggle(
+          title: "Auto-remediate: Immediately mute Microphone",
+          caption:
+            "Automatically mutes the microphone when an unauthorized keystroke or mouse surveillance tap is detected.",
+          isOn: $s.autoRemediateMuteMic
+        )
+        .disabled(!s.inputMonitoringGuardEnabled)
+        SettingToggle(
           title: "Show critical modal alert dialog on threat detection",
           caption: "Brings up an immediate security alert window with process details and remediation status.",
           isOn: $s.securityModalAlerts
@@ -587,6 +656,12 @@ struct ShortcutsPane: View {
         row("Switch peripherals", "Toggle between this Mac and the target Mac", $s.hotkeySwitch)
         row("Send to target Mac", "Release here, connect there", $s.hotkeySendToPeer)
         row("Take from target Mac", "Release there, connect here", $s.hotkeyTakeFromPeer)
+        row(
+          "Toggle Microphone Mute", "Mute or unmute the microphone independently",
+          $s.hotkeyMuteMic)
+        row(
+          "Toggle Speakers Mute", "Mute or unmute the speakers independently",
+          $s.hotkeyMuteSpeakers)
       }
       .disabled(!s.hotkeysEnabled)
       Section {

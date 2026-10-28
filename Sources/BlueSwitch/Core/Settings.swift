@@ -142,18 +142,19 @@ final class AppSettings: ObservableObject {
     case launchAtLogin, showDockIcon, appearance, menuBarIcon, leftClickAction
     case confirmBeforeSwitching, autoCheckUpdates, autoInstallUpdates, updateRepository
     case autoUpdatePeers, allowRemoteUpdates
-    // Switching
+    // Switching & Audio
     case disconnectMethod, disconnectPollInterval, disconnectMaxAttempts
     case connectRetryCount, connectRetryDelay, settleDelay, pairAttemptTimeout, requireInRange
     case autoAcceptBluetoothRequests, autoAcceptScope, autoAcceptPollInterval
     case partialStateBehavior, autoSyncPeripherals, reclaimOnLaunch
     case releaseOnSleep, reclaimOnWake
+    case muteMicOnRelease, unmuteMicOnConnect, muteSpeakersOnRelease, unmuteSpeakersOnConnect
     // Network & Security
     case deviceName, listenPort, serviceType, healthCheckTimeout
     case commandTimeout, discoveryEnabled, pairingKey, activePeerID
     case encryptNetworkTraffic, requireEncryptedConnections
     case inputMonitoringGuardEnabled, inputGuardPollInterval
-    case autoRemediateKillProcess, autoRemediateDisconnectPeripherals
+    case autoRemediateKillProcess, autoRemediateDisconnectPeripherals, autoRemediateMuteMic
     case securityModalAlerts, notifyOnSecurityAlert, allowedInputMonitorProcesses
     // Notifications
     case notificationsEnabled, notificationSound, notifyOnSwitch, notifyOnError
@@ -161,6 +162,7 @@ final class AppSettings: ObservableObject {
     case customNotifyTitle, customNotifyBody
     // Shortcuts
     case hotkeysEnabled, hotkeySwitch, hotkeySendToPeer, hotkeyTakeFromPeer
+    case hotkeyMuteMic, hotkeyMuteSpeakers
     // Advanced
     case logLevel, maxLogEntries, statusRefreshInterval
   }
@@ -265,6 +267,18 @@ final class AppSettings: ObservableObject {
   @Published var reclaimOnWake: Bool = AppSettings.load(.reclaimOnWake, false) {
     didSet { Self.save(.reclaimOnWake, reclaimOnWake) }
   }
+  @Published var muteMicOnRelease: Bool = AppSettings.load(.muteMicOnRelease, false) {
+    didSet { Self.save(.muteMicOnRelease, muteMicOnRelease) }
+  }
+  @Published var unmuteMicOnConnect: Bool = AppSettings.load(.unmuteMicOnConnect, false) {
+    didSet { Self.save(.unmuteMicOnConnect, unmuteMicOnConnect) }
+  }
+  @Published var muteSpeakersOnRelease: Bool = AppSettings.load(.muteSpeakersOnRelease, false) {
+    didSet { Self.save(.muteSpeakersOnRelease, muteSpeakersOnRelease) }
+  }
+  @Published var unmuteSpeakersOnConnect: Bool = AppSettings.load(.unmuteSpeakersOnConnect, false) {
+    didSet { Self.save(.unmuteSpeakersOnConnect, unmuteSpeakersOnConnect) }
+  }
 
   // MARK: Network
   @Published var deviceName: String = AppSettings.load(.deviceName, "") {
@@ -310,6 +324,9 @@ final class AppSettings: ObservableObject {
     .autoRemediateDisconnectPeripherals, true)
   {
     didSet { Self.save(.autoRemediateDisconnectPeripherals, autoRemediateDisconnectPeripherals) }
+  }
+  @Published var autoRemediateMuteMic: Bool = AppSettings.load(.autoRemediateMuteMic, true) {
+    didSet { Self.save(.autoRemediateMuteMic, autoRemediateMuteMic) }
   }
   @Published var securityModalAlerts: Bool = AppSettings.load(.securityModalAlerts, true) {
     didSet { Self.save(.securityModalAlerts, securityModalAlerts) }
@@ -367,6 +384,12 @@ final class AppSettings: ObservableObject {
   @Published var hotkeyTakeFromPeer = KeyCombo(encoded: AppSettings.load(.hotkeyTakeFromPeer, "")) {
     didSet { Self.save(.hotkeyTakeFromPeer, hotkeyTakeFromPeer.encoded) }
   }
+  @Published var hotkeyMuteMic = KeyCombo(encoded: AppSettings.load(.hotkeyMuteMic, "")) {
+    didSet { Self.save(.hotkeyMuteMic, hotkeyMuteMic.encoded) }
+  }
+  @Published var hotkeyMuteSpeakers = KeyCombo(encoded: AppSettings.load(.hotkeyMuteSpeakers, "")) {
+    didSet { Self.save(.hotkeyMuteSpeakers, hotkeyMuteSpeakers.encoded) }
+  }
 
   // MARK: Advanced
   @Published var logLevel: LogLevel = AppSettings.loadEnum(.logLevel, LogLevel.info) {
@@ -416,18 +439,21 @@ final class AppSettings: ObservableObject {
     autoAcceptPollInterval = 0.25
     partialStateBehavior = .smart; autoSyncPeripherals = false; reclaimOnLaunch = false
     releaseOnSleep = false; reclaimOnWake = false
+    muteMicOnRelease = false; unmuteMicOnConnect = false
+    muteSpeakersOnRelease = false; unmuteSpeakersOnConnect = false
     deviceName = ""; listenPort = 0; serviceType = "_blueswitch._tcp"; healthCheckTimeout = 5
     commandTimeout = 10; discoveryEnabled = true; pairingKey = ""
     encryptNetworkTraffic = true; requireEncryptedConnections = true
     inputMonitoringGuardEnabled = true; inputGuardPollInterval = 2.0
     autoRemediateKillProcess = true; autoRemediateDisconnectPeripherals = true
+    autoRemediateMuteMic = true
     securityModalAlerts = true; notifyOnSecurityAlert = true; allowedInputMonitorProcesses = ""
     notificationsEnabled = true; notificationSound = true; notifyOnSwitch = true
     notifyOnError = true; notifyOnPeerFound = false; notifyOnRemoteRequest = true
     confirmSentNotification = true; customNotifyTitle = "New Notification"
     customNotifyBody = "You have a new notification from {device}"
     hotkeysEnabled = true; hotkeySwitch = .none; hotkeySendToPeer = .none
-    hotkeyTakeFromPeer = .none
+    hotkeyTakeFromPeer = .none; hotkeyMuteMic = .none; hotkeyMuteSpeakers = .none
     logLevel = .info; maxLogEntries = 500; statusRefreshInterval = 3
   }
 

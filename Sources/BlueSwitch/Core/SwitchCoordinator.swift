@@ -174,6 +174,7 @@ final class SwitchCoordinator: ObservableObject {
         return
       }
       self.setPhase(.working("Handing off to \(peer.name)…"))
+      self.applyAudioOnRelease()
       var msg = PeerMessage.make(.connectAll)
       msg.peripherals = listToSend
       self.net.send(msg, to: peer) { result in
@@ -217,12 +218,32 @@ final class SwitchCoordinator: ObservableObject {
       if total == 0 {
         self.fail("No peripherals registered. Add them in Settings → Peripherals.")
       } else if ok == total {
+        self.applyAudioOnConnect()
         self.succeed("Peripherals connected to this Mac")
       } else if ok > 0 {
+        self.applyAudioOnConnect()
         self.fail("Connected \(ok) of \(total) peripherals", title: "Partially switched")
       } else {
         self.fail("Couldn't connect peripherals to this Mac")
       }
+    }
+  }
+
+  private func applyAudioOnRelease() {
+    if settings.muteMicOnRelease {
+      AudioService.shared.setMicMuted(true, reason: "Peripherals switched away from this Mac")
+    }
+    if settings.muteSpeakersOnRelease {
+      AudioService.shared.setSpeakersMuted(true, reason: "Peripherals switched away from this Mac")
+    }
+  }
+
+  private func applyAudioOnConnect() {
+    if settings.unmuteMicOnConnect {
+      AudioService.shared.setMicMuted(false, reason: "Peripherals connected to this Mac")
+    }
+    if settings.unmuteSpeakersOnConnect {
+      AudioService.shared.setSpeakersMuted(false, reason: "Peripherals connected to this Mac")
     }
   }
 
@@ -245,6 +266,7 @@ final class SwitchCoordinator: ObservableObject {
         resp.peripherals = snapshot
         reply(resp)
         if ok {
+          self?.applyAudioOnRelease()
           self?.succeed("Peripherals handed to \(msg.sender)", kind: .remoteRequest)
         } else {
           self?.fail("Couldn't release peripherals for \(msg.sender)")
@@ -261,8 +283,10 @@ final class SwitchCoordinator: ObservableObject {
         if total == 0 {
           self?.fail("No peripherals registered to receive from \(msg.sender)")
         } else if ok == total {
+          self?.applyAudioOnConnect()
           self?.succeed("Peripherals received from \(msg.sender)", kind: .remoteRequest)
         } else {
+          if ok > 0 { self?.applyAudioOnConnect() }
           self?.fail("Connected \(ok) of \(total) peripherals from \(msg.sender)")
         }
       }

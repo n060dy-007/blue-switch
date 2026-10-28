@@ -13,6 +13,8 @@ let package = Package(
       path: "Sources/BlueSwitch",
       linkerSettings: [
         .linkedFramework("ApplicationServices"),
+        .linkedFramework("AudioToolbox"),
+        .linkedFramework("CoreAudio"),
         .linkedFramework("IOBluetooth"),
         .linkedFramework("IOKit"),
         .linkedFramework("Carbon"),

@@ -149,6 +149,27 @@ final class StatusBarController: NSObject, NSMenuDelegate {
     }
     menu.addItem(.separator())
 
+    let audio = AudioService.shared
+    let audioHeader = NSMenuItem(title: "Audio Controls", action: nil, keyEquivalent: "")
+    audioHeader.isEnabled = false
+    menu.addItem(audioHeader)
+
+    let micItem = item(
+      audio.isMicMuted ? "Unmute Microphone (Muted)" : "Mute Microphone (\(audio.micVolume)%)",
+      #selector(toggleMicMuteAction),
+      symbol: audio.isMicMuted ? "mic.slash.fill" : "mic.fill")
+    micItem.state = audio.isMicMuted ? .on : .off
+    menu.addItem(micItem)
+
+    let spkItem = item(
+      audio.isSpeakersMuted
+        ? "Unmute Speakers (Muted)" : "Mute Speakers (\(audio.speakersVolume)%)",
+      #selector(toggleSpeakersMuteAction),
+      symbol: audio.isSpeakersMuted ? "speaker.slash.fill" : "speaker.wave.2.fill")
+    spkItem.state = audio.isSpeakersMuted ? .on : .off
+    menu.addItem(spkItem)
+    menu.addItem(.separator())
+
     menu.addItem(item("Open Dashboard", #selector(openDashboard), symbol: "rectangle.grid.2x2"))
     let s = item("Settings…", #selector(openSettingsAction), symbol: "gearshape")
     s.keyEquivalent = ","
@@ -181,6 +202,8 @@ final class StatusBarController: NSObject, NSMenuDelegate {
   @objc private func doSwitch() { coordinator.switchDevices() }
   @objc private func doSend() { coordinator.sendToPeer() }
   @objc private func doTake() { coordinator.takeFromPeer() }
+  @objc private func toggleMicMuteAction() { AudioService.shared.toggleMicMute() }
+  @objc private func toggleSpeakersMuteAction() { AudioService.shared.toggleSpeakersMute() }
   @objc private func openDashboard() {
     DispatchQueue.main.async { self.togglePopover() }
   }

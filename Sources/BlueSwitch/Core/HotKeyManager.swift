@@ -6,7 +6,7 @@ final class HotKeyManager {
   static let shared = HotKeyManager()
 
   enum Action: UInt32, CaseIterable {
-    case switchDevices = 1, sendToPeer, takeFromPeer
+    case switchDevices = 1, sendToPeer, takeFromPeer, muteMic, muteSpeakers
   }
 
   var handler: ((Action) -> Void)?
@@ -23,6 +23,8 @@ final class HotKeyManager {
     register(s.hotkeySwitch, for: .switchDevices)
     register(s.hotkeySendToPeer, for: .sendToPeer)
     register(s.hotkeyTakeFromPeer, for: .takeFromPeer)
+    register(s.hotkeyMuteMic, for: .muteMic)
+    register(s.hotkeyMuteSpeakers, for: .muteSpeakers)
   }
 
   private func installHandlerIfNeeded() {

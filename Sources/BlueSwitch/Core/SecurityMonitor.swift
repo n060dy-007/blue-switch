@@ -287,6 +287,13 @@ final class SecurityMonitor: ObservableObject {
       }
     }
 
+    // 3. Auto-Remediation: Immediately mute Microphone so audio cannot be captured
+    if settings.autoRemediateMuteMic && !AudioService.shared.isMicMuted {
+      AudioService.shared.setMicMuted(true, reason: "Security auto-remediation (PID \(incident.pid))")
+      actions.append("Muted Microphone")
+      mutableIncident.isResolved = true
+    }
+
     if actions.isEmpty {
       actions.append("Alerted user (auto-remediation disabled)")
     }
@@ -411,3 +418,4 @@ final class SecurityMonitor: ObservableObject {
     return String(cString: buffer)
   }
 }
+

@@ -28,6 +28,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     BluetoothService.shared.requestAccess()
     BluetoothService.shared.startMonitoring()
     BluetoothAutoClicker.shared.start()
+    AudioService.shared.start()
     SecurityMonitor.shared.start()
     NetworkService.shared.start()
     SwitchCoordinator.shared.start()
@@ -37,6 +38,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       case .switchDevices: SwitchCoordinator.shared.switchDevices()
       case .sendToPeer: SwitchCoordinator.shared.sendToPeer()
       case .takeFromPeer: SwitchCoordinator.shared.takeFromPeer()
+      case .muteMic: AudioService.shared.toggleMicMute()
+      case .muteSpeakers: AudioService.shared.toggleSpeakersMute()
       }
     }
     HotKeyManager.shared.reload()
@@ -101,9 +104,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       settings.$hotkeysEnabled.map { _ in () }.eraseToAnyPublisher(),
       settings.$hotkeySwitch.map { _ in () }.eraseToAnyPublisher(),
       settings.$hotkeySendToPeer.map { _ in () }.eraseToAnyPublisher(),
-      settings.$hotkeyTakeFromPeer.map { _ in () }.eraseToAnyPublisher()
+      settings.$hotkeyTakeFromPeer.map { _ in () }.eraseToAnyPublisher(),
+      settings.$hotkeyMuteMic.map { _ in () }.eraseToAnyPublisher(),
+      settings.$hotkeyMuteSpeakers.map { _ in () }.eraseToAnyPublisher()
     )
-    .dropFirst(4)
+    .dropFirst(6)
     .receive(on: DispatchQueue.main)
     .sink { HotKeyManager.shared.reload() }
     .store(in: &cancellables)

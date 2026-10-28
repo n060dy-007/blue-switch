@@ -11,6 +11,7 @@ struct DashboardView: View {
   @ObservedObject private var clicker = BluetoothAutoClicker.shared
   @ObservedObject private var updates = UpdateChecker.shared
   @ObservedObject private var sec = SecurityMonitor.shared
+  @ObservedObject private var audio = AudioService.shared
 
   var body: some View {
     VStack(spacing: 0) {
@@ -70,14 +71,98 @@ struct DashboardView: View {
             Card { AccessibilityPermissionBanner(compact: true) }
           }
           switchCard
+          audioCard
           peripheralsCard
         }
         .padding(14)
       }
       footer
     }
-    .frame(width: 360, height: 520)
-    .onAppear { clicker.refreshPermission() }
+    .frame(width: 360, height: 560)
+    .onAppear {
+      clicker.refreshPermission()
+      audio.refresh()
+    }
+  }
+
+  // MARK: Audio (Separate Mic & Speakers Mute)
+
+  private var audioCard: some View {
+    Card {
+      VStack(alignment: .leading, spacing: 10) {
+        HStack {
+          Label("Audio Controls", systemImage: "waveform")
+            .font(.headline)
+          Spacer()
+          Button {
+            audio.refresh()
+          } label: {
+            Image(systemName: "arrow.clockwise")
+          }
+          .buttonStyle(.borderless)
+          .help("Refresh audio state")
+        }
+
+        HStack(spacing: 8) {
+          Button {
+            audio.toggleMicMute()
+          } label: {
+            Label(
+              audio.isMicMuted ? "Mic Muted" : "Mute Mic",
+              systemImage: audio.isMicMuted ? "mic.slash.fill" : "mic.fill"
+            )
+          }
+          .buttonStyle(PillButtonStyle(tint: audio.isMicMuted ? Theme.red : Theme.indigo))
+
+          Button {
+            audio.toggleSpeakersMute()
+          } label: {
+            Label(
+              audio.isSpeakersMuted ? "Speakers Muted" : "Mute Speakers",
+              systemImage: audio.isSpeakersMuted ? "speaker.slash.fill" : "speaker.wave.2.fill"
+            )
+          }
+          .buttonStyle(PillButtonStyle(tint: audio.isSpeakersMuted ? Theme.red : Theme.blue))
+        }
+
+        VStack(spacing: 6) {
+          HStack(spacing: 8) {
+            Image(systemName: audio.isMicMuted ? "mic.slash.fill" : "mic.fill")
+              .foregroundStyle(audio.isMicMuted ? Theme.red : .secondary)
+              .frame(width: 18)
+            Slider(
+              value: Binding(
+                get: { Double(audio.micVolume) },
+                set: { audio.setMicVolume(Int($0)) }
+              ),
+              in: 0...100
+            )
+            .controlSize(.small)
+            Text(audio.isMicMuted ? "Muted" : "\(audio.micVolume)%")
+              .font(.caption2.monospacedDigit())
+              .foregroundStyle(audio.isMicMuted ? Theme.red : .secondary)
+              .frame(width: 42, alignment: .trailing)
+          }
+          HStack(spacing: 8) {
+            Image(systemName: audio.isSpeakersMuted ? "speaker.slash.fill" : "speaker.wave.2.fill")
+              .foregroundStyle(audio.isSpeakersMuted ? Theme.red : .secondary)
+              .frame(width: 18)
+            Slider(
+              value: Binding(
+                get: { Double(audio.speakersVolume) },
+                set: { audio.setSpeakersVolume(Int($0)) }
+              ),
+              in: 0...100
+            )
+            .controlSize(.small)
+            Text(audio.isSpeakersMuted ? "Muted" : "\(audio.speakersVolume)%")
+              .font(.caption2.monospacedDigit())
+              .foregroundStyle(audio.isSpeakersMuted ? Theme.red : .secondary)
+              .frame(width: 42, alignment: .trailing)
+          }
+        }
+      }
+    }
   }
 
   // MARK: Header
