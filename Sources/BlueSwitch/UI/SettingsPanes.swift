@@ -67,8 +67,13 @@ struct GeneralPane: View {
           isOn: $s.allowRemoteUpdates)
         SettingToggle(
           title: "Automatically check GitHub for updates",
-          caption: "Checks GitHub releases once a day and notifies you of new versions.",
+          caption: "Checks GitHub releases on launch and every 4 hours.",
           isOn: $s.autoCheckUpdates)
+        SettingToggle(
+          title: "Automatically install new GitHub releases",
+          caption:
+            "When a newer release is published on GitHub, automatically download, install, and restart BlueSwitch.",
+          isOn: $s.autoInstallUpdates)
         HStack {
           SettingLabel(title: "Release feed", caption: "GitHub repository in owner/name form.")
           Spacer()
@@ -76,31 +81,37 @@ struct GeneralPane: View {
             .textFieldStyle(.roundedBorder)
             .frame(width: 240)
         }
-        HStack {
+        VStack(alignment: .leading, spacing: 8) {
           Text(updates.status).font(.callout).foregroundStyle(.secondary)
-          Spacer()
-          if updates.hasNewerReleaseOnline && updates.latestAssetURL != nil {
-            Button(updates.isInstalling ? "Installing…" : "Download & Install") {
-              updates.downloadAndInstallLatestRelease(alsoUpdatePeers: s.autoUpdatePeers)
+          HStack(spacing: 8) {
+            if updates.hasNewerReleaseOnline {
+              Button(updates.isInstalling ? "Installing…" : "Download & Install from GitHub") {
+                updates.checkAndInstallLatestRelease(alsoUpdatePeers: s.autoUpdatePeers)
+              }
+              .buttonStyle(.borderedProminent)
+              .disabled(updates.isInstalling || updates.isChecking)
+            } else {
+              Button(updates.isInstalling ? "Installing…" : "Install Latest GitHub Release") {
+                updates.checkAndInstallLatestRelease(alsoUpdatePeers: s.autoUpdatePeers)
+              }
+              .disabled(updates.isInstalling || updates.isChecking)
             }
-            .buttonStyle(.borderedProminent)
+            Button(updates.isChecking ? "Checking…" : "Check Now") {
+              updates.check(userInitiated: true)
+            }
+            .disabled(updates.isChecking || updates.isInstalling)
+            if updates.latestURL != nil {
+              Button("View on GitHub") { updates.openLatest() }
+            }
+            Button("Install from File…") {
+              updates.installFromFilePicker(alsoUpdatePeers: s.autoUpdatePeers)
+            }
             .disabled(updates.isInstalling)
+            Button("Push v\(AppInfo.version) to All Macs") {
+              updates.pushUpdateToAllPeers()
+            }
+            .disabled(NetworkService.shared.peers.isEmpty)
           }
-          if updates.latestURL != nil {
-            Button("View Release") { updates.openLatest() }
-          }
-          Button("Install from File…") {
-            updates.installFromFilePicker(alsoUpdatePeers: s.autoUpdatePeers)
-          }
-          .disabled(updates.isInstalling)
-          Button("Push v\(AppInfo.version) to All Macs") {
-            updates.pushUpdateToAllPeers()
-          }
-          .disabled(NetworkService.shared.peers.isEmpty)
-          Button(updates.isChecking ? "Checking…" : "Check Now") {
-            updates.check(userInitiated: true)
-          }
-          .disabled(updates.isChecking || updates.isInstalling)
         }
       }
     }

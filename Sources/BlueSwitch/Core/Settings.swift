@@ -140,7 +140,7 @@ final class AppSettings: ObservableObject {
   enum Key: String, CaseIterable {
     // General
     case launchAtLogin, showDockIcon, appearance, menuBarIcon, leftClickAction
-    case confirmBeforeSwitching, autoCheckUpdates, updateRepository
+    case confirmBeforeSwitching, autoCheckUpdates, autoInstallUpdates, updateRepository
     case autoUpdatePeers, allowRemoteUpdates
     // Switching
     case disconnectMethod, disconnectPollInterval, disconnectMaxAttempts
@@ -192,6 +192,9 @@ final class AppSettings: ObservableObject {
   }
   @Published var autoCheckUpdates: Bool = AppSettings.load(.autoCheckUpdates, true) {
     didSet { Self.save(.autoCheckUpdates, autoCheckUpdates) }
+  }
+  @Published var autoInstallUpdates: Bool = AppSettings.load(.autoInstallUpdates, false) {
+    didSet { Self.save(.autoInstallUpdates, autoInstallUpdates) }
   }
   @Published var updateRepository: String = AppSettings.load(.updateRepository, "n060dy-007/blue-switch") {
     didSet { Self.save(.updateRepository, updateRepository) }
@@ -356,13 +359,19 @@ final class AppSettings: ObservableObject {
     return t.isEmpty ? "_blueswitch._tcp" : t
   }
 
-  private init() {}
+  private init() {
+    let trimmedRepo = updateRepository.trimmingCharacters(in: .whitespacesAndNewlines)
+    if trimmedRepo.isEmpty || trimmedRepo.caseInsensitiveCompare("Fl0p/BlueSwitch") == .orderedSame {
+      updateRepository = "n060dy-007/blue-switch"
+    }
+  }
 
   /// Removes every stored setting, then reloads defaults by relaunch-free reassignment.
   func resetToDefaults() {
     for k in Key.allCases { Self.d.removeObject(forKey: k.rawValue) }
     launchAtLogin = false; showDockIcon = false; appearance = .system; menuBarIcon = .asterisk
     leftClickAction = .switchDevices; confirmBeforeSwitching = false; autoCheckUpdates = true
+    autoInstallUpdates = false
     updateRepository = "n060dy-007/blue-switch"
     autoUpdatePeers = true; allowRemoteUpdates = true
     disconnectMethod = .unpair; disconnectPollInterval = 0.5; disconnectMaxAttempts = 5

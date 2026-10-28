@@ -21,6 +21,7 @@ final class UpdateChecker: ObservableObject {
   private let lastCheckKey = "updateLastCheck"
   private let queue = DispatchQueue(label: "com.blueswitch.updater", qos: .userInitiated)
   private var lastAutoUpdateAttempt: [String: Date] = [:]
+  private var periodicCheckTimer: Timer?
 
   private init() {}
 
@@ -39,25 +40,34 @@ final class UpdateChecker: ObservableObject {
 
   // MARK: - GitHub Release Check
 
-  /// Checks at most once per day when automatic checks are enabled.
+  /// Checks on launch and every 4 hours when automatic checks are enabled.
   func checkOnLaunchIfNeeded() {
+    periodicCheckTimer?.invalidate()
+    periodicCheckTimer = Timer.scheduledTimer(withTimeInterval: 14_400, repeats: true) {
+      [weak self] _ in
+      guard AppSettings.shared.autoCheckUpdates else { return }
+      self?.check(userInitiated: false)
+    }
     guard AppSettings.shared.autoCheckUpdates else { return }
-    let last = UserDefaults.standard.object(forKey: lastCheckKey) as? Date ?? .distantPast
-    if Date().timeIntervalSince(last) > 86_400 { check(userInitiated: false) }
+    DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+      self?.check(userInitiated: false)
+    }
   }
 
-  func check(userInitiated: Bool) {
+  func check(userInitiated: Bool, completion: ((Bool) -> Void)? = nil) {
     let repo = AppSettings.shared.updateRepository.trimmingCharacters(in: .whitespaces)
     guard repo.split(separator: "/").count == 2,
       let url = URL(string: "https://api.github.com/repos/\(repo)/releases/latest")
     else {
       status = "Invalid repository (use owner/name)"
+      completion?(false)
       return
     }
     isChecking = true
-    status = "Checking GitHub releases…"
+    status = "Checking GitHub releases (\(repo))…"
     var req = URLRequest(url: url)
     req.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+    req.cachePolicy = .reloadIgnoringLocalCacheData
     req.timeoutInterval = 15
     URLSession.shared.dataTask(with: req) { [weak self] data, _, error in
       DispatchQueue.main.async {
@@ -66,6 +76,7 @@ final class UpdateChecker: ObservableObject {
         UserDefaults.standard.set(Date(), forKey: self.lastCheckKey)
         if let error {
           self.status = "Check failed: \(error.localizedDescription)"
+          completion?(false)
           return
         }
         guard let data,
@@ -73,6 +84,7 @@ final class UpdateChecker: ObservableObject {
           let tag = json["tag_name"] as? String
         else {
           self.status = "No releases found (local v\(AppInfo.version))"
+          completion?(false)
           return
         }
         let name = (json["name"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? tag
@@ -94,8 +106,26 @@ final class UpdateChecker: ObservableObject {
           UserDefaults.standard.set(tag, forKey: self.lastSeenKey)
         }
         Log.info("Update check: \(name) (newer: \(isNewer))", "Update")
+        completion?(true)
+
+        if isNewer && AppSettings.shared.autoInstallUpdates && !self.isInstalling {
+          Log.info("Auto-installing new GitHub release \(name)…", "Update")
+          self.downloadAndInstallLatestRelease(alsoUpdatePeers: AppSettings.shared.autoUpdatePeers)
+        }
       }
     }.resume()
+  }
+
+  /// Queries GitHub for the latest release (if needed) and immediately downloads & installs its asset.
+  func checkAndInstallLatestRelease(alsoUpdatePeers: Bool = true) {
+    if latestAssetURL != nil {
+      downloadAndInstallLatestRelease(alsoUpdatePeers: alsoUpdatePeers)
+      return
+    }
+    check(userInitiated: true) { [weak self] ok in
+      guard let self, ok, self.latestAssetURL != nil else { return }
+      self.downloadAndInstallLatestRelease(alsoUpdatePeers: alsoUpdatePeers)
+    }
   }
 
   private static func extractDownloadAssetURL(from releaseJSON: [String: Any]) -> URL? {
@@ -548,11 +578,13 @@ final class UpdateChecker: ObservableObject {
 
     let pid = ProcessInfo.processInfo.processIdentifier
     let script = """
-      sleep 0.8
+      sleep 0.6
       for i in 1 2 3 4 5; do
         if ! kill -0 \(pid) 2>/dev/null; then break; fi
         sleep 0.3
       done
+      killall BlueSwitch 2>/dev/null || true
+      sleep 0.3
       rm -rf "\(targetPath)"
       cp -R "\(stagedAppURL.path)" "\(targetPath)"
       if [ "\(targetPath)" != "/Applications/BlueSwitch.app" ] && [ -d "/Applications/BlueSwitch.app" ]; then
@@ -560,6 +592,7 @@ final class UpdateChecker: ObservableObject {
         cp -R "\(stagedAppURL.path)" "/Applications/BlueSwitch.app"
       fi
       xattr -dr com.apple.quarantine "\(targetPath)" 2>/dev/null || true
+      codesign --force --deep --sign - "\(targetPath)" 2>/dev/null || true
       touch "\(targetPath)"
       /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "\(targetPath)" 2>/dev/null || true
       open -n "\(targetPath)"

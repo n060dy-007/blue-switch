@@ -153,6 +153,17 @@ final class StatusBarController: NSObject, NSMenuDelegate {
     let s = item("Settings…", #selector(openSettingsAction), symbol: "gearshape")
     s.keyEquivalent = ","
     menu.addItem(s)
+    if UpdateChecker.shared.hasNewerReleaseOnline, let tag = UpdateChecker.shared.latestVersionTag {
+      menu.addItem(
+        item(
+          "Install Update (\(tag)) from GitHub", #selector(installGitHubUpdate),
+          symbol: "arrow.down.circle.fill"))
+    } else {
+      menu.addItem(
+        item(
+          "Check for GitHub Updates…", #selector(checkGitHubUpdates),
+          symbol: "arrow.triangle.2.circlepath.circle"))
+    }
     menu.addItem(.separator())
     let q = NSMenuItem(
       title: "Quit BlueSwitch", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
@@ -174,6 +185,14 @@ final class StatusBarController: NSObject, NSMenuDelegate {
     DispatchQueue.main.async { self.togglePopover() }
   }
   @objc private func openSettingsAction() { openSettings(nil) }
+  @objc private func checkGitHubUpdates() {
+    UpdateChecker.shared.check(userInitiated: true)
+    openSettings(.general)
+  }
+  @objc private func installGitHubUpdate() {
+    UpdateChecker.shared.checkAndInstallLatestRelease(
+      alsoUpdatePeers: AppSettings.shared.autoUpdatePeers)
+  }
 
   @objc private func selectPeer(_ sender: NSMenuItem) {
     guard let id = sender.representedObject as? String,

@@ -9,12 +9,33 @@ struct DashboardView: View {
   @ObservedObject private var coordinator = SwitchCoordinator.shared
   @ObservedObject private var settings = AppSettings.shared
   @ObservedObject private var clicker = BluetoothAutoClicker.shared
+  @ObservedObject private var updates = UpdateChecker.shared
 
   var body: some View {
     VStack(spacing: 0) {
       header
       ScrollView {
         VStack(spacing: 12) {
+          if updates.hasNewerReleaseOnline, let tag = updates.latestVersionTag {
+            Card {
+              HStack(spacing: 10) {
+                Image(systemName: "arrow.down.circle.fill")
+                  .font(.title3)
+                  .foregroundStyle(Theme.blue)
+                VStack(alignment: .leading, spacing: 2) {
+                  Text("Update \(tag) available on GitHub").font(.caption.weight(.semibold))
+                  Text(updates.status).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+                }
+                Spacer()
+                Button(updates.isInstalling ? "Installing…" : "Update") {
+                  updates.checkAndInstallLatestRelease(alsoUpdatePeers: settings.autoUpdatePeers)
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+                .disabled(updates.isInstalling)
+              }
+            }
+          }
           if !bt.isAuthorized {
             Card { BluetoothPermissionBanner(compact: true) }
           }
