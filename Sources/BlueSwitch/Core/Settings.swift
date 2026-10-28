@@ -193,7 +193,7 @@ final class AppSettings: ObservableObject {
   @Published var autoCheckUpdates: Bool = AppSettings.load(.autoCheckUpdates, true) {
     didSet { Self.save(.autoCheckUpdates, autoCheckUpdates) }
   }
-  @Published var updateRepository: String = AppSettings.load(.updateRepository, "HoshimuraYuto/blue-switch") {
+  @Published var updateRepository: String = AppSettings.load(.updateRepository, "n060dy-007/blue-switch") {
     didSet { Self.save(.updateRepository, updateRepository) }
   }
   @Published var autoUpdatePeers: Bool = AppSettings.load(.autoUpdatePeers, true) {
@@ -363,7 +363,7 @@ final class AppSettings: ObservableObject {
     for k in Key.allCases { Self.d.removeObject(forKey: k.rawValue) }
     launchAtLogin = false; showDockIcon = false; appearance = .system; menuBarIcon = .asterisk
     leftClickAction = .switchDevices; confirmBeforeSwitching = false; autoCheckUpdates = true
-    updateRepository = "HoshimuraYuto/blue-switch"
+    updateRepository = "n060dy-007/blue-switch"
     autoUpdatePeers = true; allowRemoteUpdates = true
     disconnectMethod = .unpair; disconnectPollInterval = 0.5; disconnectMaxAttempts = 5
     connectRetryCount = 4; connectRetryDelay = 1.0; settleDelay = 0.8; pairAttemptTimeout = 5.0
