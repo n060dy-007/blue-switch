@@ -146,6 +146,7 @@ final class SwitchCoordinator: ObservableObject {
       DispatchQueue.main.asyncAfter(deadline: .now() + 1.15) { [weak self] in
         DemoMode.shared.demoPeripheralsConnectedHere = false
         self?.applyAudioOnRelease()
+        Log.demo(.info, "Switch", "Peripherals sent to \(peerName) over AES-256-GCM")
         self?.succeed("Peripherals sent to \(peerName)")
       }
     } else {
@@ -154,9 +155,11 @@ final class SwitchCoordinator: ObservableObject {
         self?.setPhase(.working("Connecting Magic Keyboard, Trackpad & Mouse…"))
       }
       DispatchQueue.main.asyncAfter(deadline: .now() + 1.15) { [weak self] in
+        let localName = DemoMode.shared.localMacDisplayName
         DemoMode.shared.demoPeripheralsConnectedHere = true
         self?.applyAudioOnConnect()
-        self?.succeed("Peripherals connected to Mac Studio")
+        Log.demo(.info, "Switch", "Peripherals connected to \(localName) (Bonded AES/E0 Encrypted)")
+        self?.succeed("Peripherals connected to \(localName)")
       }
     }
   }

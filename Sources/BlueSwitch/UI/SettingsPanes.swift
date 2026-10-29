@@ -12,9 +12,9 @@ struct GeneralPane: View {
       Section("Startup") {
         SettingToggle(
           title: "Launch at login",
-          caption: "Start BlueSwitch automatically when you log in. Status: \(loginStatus)",
+          caption: "Start BlueSwitch automatically when you log in. Status: \(s.demoModeEnabled ? "Enabled" : loginStatus)",
           isOn: $s.launchAtLogin)
-        if loginStatus.contains("approval") {
+        if loginStatus.contains("approval") && !s.demoModeEnabled {
           Button("Open Login Items Settings…") { LoginItem.openSystemSettings() }
         }
         SettingToggle(
@@ -104,9 +104,14 @@ struct GeneralPane: View {
           }
         }
         VStack(alignment: .leading, spacing: 8) {
-          Text(DemoMode.shared.sanitizeLog(updates.status)).font(.callout).foregroundStyle(.secondary)
+          Text(
+            s.demoModeEnabled
+              ? "Up to date (v\(AppInfo.version) · demo-org/blue-switch)"
+              : DemoMode.shared.sanitizeLog(updates.status)
+          )
+          .font(.callout).foregroundStyle(.secondary)
           HStack(spacing: 8) {
-            if updates.hasNewerReleaseOnline {
+            if !s.demoModeEnabled && updates.hasNewerReleaseOnline {
               Button(updates.isInstalling ? "Installing…" : "Download & Install from GitHub") {
                 updates.checkAndInstallLatestRelease(alsoUpdatePeers: s.autoUpdatePeers)
               }
@@ -116,23 +121,23 @@ struct GeneralPane: View {
               Button(updates.isInstalling ? "Installing…" : "Install Latest GitHub Release") {
                 updates.checkAndInstallLatestRelease(alsoUpdatePeers: s.autoUpdatePeers)
               }
-              .disabled(updates.isInstalling || updates.isChecking)
+              .disabled(s.demoModeEnabled || updates.isInstalling || updates.isChecking)
             }
             Button(updates.isChecking ? "Checking…" : "Check Now") {
               updates.check(userInitiated: true)
             }
-            .disabled(updates.isChecking || updates.isInstalling)
-            if updates.latestURL != nil {
+            .disabled(s.demoModeEnabled || updates.isChecking || updates.isInstalling)
+            if updates.latestURL != nil && !s.demoModeEnabled {
               Button("View on GitHub") { updates.openLatest() }
             }
             Button("Install from File…") {
               updates.installFromFilePicker(alsoUpdatePeers: s.autoUpdatePeers)
             }
-            .disabled(updates.isInstalling)
+            .disabled(s.demoModeEnabled || updates.isInstalling)
             Button("Push v\(AppInfo.version) to All Macs") {
               updates.pushUpdateToAllPeers()
             }
-            .disabled(NetworkService.shared.peers.isEmpty)
+            .disabled(s.demoModeEnabled || NetworkService.shared.peers.isEmpty)
           }
         }
       }
@@ -195,6 +200,7 @@ struct SwitchingPane: View {
           value: $s.autoAcceptPollInterval, range: 0.1...1.5, step: 0.05)
           .disabled(!s.autoAcceptBluetoothRequests)
 
+        let axTrusted = s.demoModeEnabled ? true : clicker.isAccessibilityTrusted
         HStack(spacing: 10) {
           SettingLabel(
             title: "Accessibility permission",
@@ -202,28 +208,29 @@ struct SwitchingPane: View {
               "Required by macOS to read and click the \"Connect\" button in BluetoothUIServer and Notification Center.")
           Spacer()
           StatusPill(
-            text: clicker.isAccessibilityTrusted ? "Allowed" : "Permission Required",
-            color: clicker.isAccessibilityTrusted ? Theme.green : Theme.amber)
+            text: axTrusted ? "Allowed" : "Permission Required",
+            color: axTrusted ? Theme.green : Theme.amber)
         }
 
         HStack {
-          if let last = clicker.lastAutoClickedSummary {
+          if !s.demoModeEnabled, let last = clicker.lastAutoClickedSummary {
             Text("Auto-clicked \(clicker.autoClickCount)× · Last: \(last)")
               .font(.caption).foregroundStyle(.secondary)
           } else {
             Text(
-              clicker.isAccessibilityTrusted
+              axTrusted
                 ? "Ready — watching for Bluetooth connection prompts."
                 : "Allow BlueSwitch in System Settings → Privacy & Security → Accessibility."
             )
             .font(.caption).foregroundStyle(.secondary)
           }
           Spacer()
-          if !clicker.isAccessibilityTrusted {
+          if !axTrusted {
             Button("Request Permission") { clicker.requestPermission() }
             Button("Open Accessibility Settings…") { clicker.openAccessibilitySettings() }
           } else {
             Button("Scan & Click Now") { clicker.scanAndClickNow(forceScope: true) }
+              .disabled(s.demoModeEnabled)
           }
           Button {
             clicker.refreshPermission()
@@ -381,21 +388,31 @@ struct NetworkPane: View {
     PaneContainer(pane: .network) {
       Section("Status & Security Audit") {
         statusRow("Advertised as", demo.publishedServiceDisplayName)
-        statusRow("Listener", net.listenerStatus + demo.listeningPortDisplay)
-        statusRow("Discovery", net.browserStatus)
+        statusRow(
+          "Listener",
+          (s.demoModeEnabled ? "Listening" : net.listenerStatus) + demo.listeningPortDisplay)
+        statusRow(
+          "Discovery",
+          s.demoModeEnabled ? "Browsing (_blueswitch._tcp)" : net.browserStatus)
         statusRow(
           "Transport encryption",
           s.encryptNetworkTraffic ? "AES-256-GCM + HKDF-SHA256 + Replay Guard" : "Disabled (Legacy)")
         statusRow(
           "Keystroke & Mouse Guard",
-          s.inputMonitoringGuardEnabled
-            ? "Active (\(sec.activeTapCount) system event tap(s) inspected)"
-            : "Paused")
+          s.demoModeEnabled
+            ? "Active (2 system event tap(s) inspected)"
+            : (s.inputMonitoringGuardEnabled
+              ? "Active (\(sec.activeTapCount) system event tap(s) inspected)"
+              : "Paused"))
         HStack {
           Text("Persistent security log")
           Spacer()
-          Text(demo.sanitizePath(sec.auditLogFilePath))
-            .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+          Text(
+            s.demoModeEnabled
+              ? "~/Library/Logs/BlueSwitch/security-audit.log"
+              : demo.sanitizePath(sec.auditLogFilePath)
+          )
+          .font(.caption).foregroundStyle(.secondary).lineLimit(1)
           Button("Reveal in Finder") {
             NSWorkspace.shared.selectFile(sec.auditLogFilePath, inFileViewerRootedAtPath: "")
           }
@@ -410,7 +427,7 @@ struct NetworkPane: View {
             title: "Device name", caption: "Name other Macs see. Leave blank to use the computer name.")
           Spacer()
           if s.demoModeEnabled {
-            TextField("Mac Studio", text: .constant("Mac Studio"))
+            TextField("Mac Studio", text: .constant(demo.localMacDisplayName))
               .textFieldStyle(.roundedBorder).frame(width: 220)
               .disabled(true)
           } else {
@@ -424,7 +441,7 @@ struct NetworkPane: View {
             caption: "0 = automatic. Set a fixed port if you add this Mac manually on the other side.")
           Spacer()
           if s.demoModeEnabled {
-            TextField("0", text: .constant("48155"))
+            TextField("0", text: .constant("54820"))
               .textFieldStyle(.roundedBorder).frame(width: 90)
               .disabled(true)
           } else {
@@ -443,9 +460,13 @@ struct NetworkPane: View {
             title: "Bonjour service type",
             caption: "Must match on every Mac. Change only if you know you need to.")
           Spacer()
-          TextField("_blueswitch._tcp", text: $draftType)
-            .textFieldStyle(.roundedBorder).frame(width: 180)
-            .font(.system(.body, design: .monospaced))
+          TextField(
+            "_blueswitch._tcp",
+            text: s.demoModeEnabled ? .constant("_blueswitch._tcp") : $draftType
+          )
+          .textFieldStyle(.roundedBorder).frame(width: 180)
+          .font(.system(.body, design: .monospaced))
+          .disabled(s.demoModeEnabled)
         }
         HStack {
           Spacer()
@@ -563,9 +584,19 @@ struct NetworkPane: View {
             title: "Trusted input-monitoring processes",
             caption: "Comma-separated bundle IDs or process names allowed to use event taps.")
           Spacer()
-          TextField("e.g. com.apple.universalaccessd", text: $s.allowedInputMonitorProcesses)
+          if s.demoModeEnabled {
+            TextField(
+              "e.g. com.apple.universalaccessd",
+              text: .constant("com.apple.universalaccessd")
+            )
             .textFieldStyle(.roundedBorder).frame(width: 240)
+            .disabled(true)
+          } else {
+            TextField("e.g. com.apple.universalaccessd", text: $s.allowedInputMonitorProcesses)
+              .textFieldStyle(.roundedBorder).frame(width: 240)
+          }
         }
+        let visibleIncidents = demo.effectiveSecurityIncidents
         HStack(spacing: 10) {
           Button("Scan Event Taps Now") {
             sec.scanNow()
@@ -573,19 +604,23 @@ struct NetworkPane: View {
           Button("Simulate Keystroke/Mouse Logger Alert") {
             sec.triggerSimulatedIncident()
           }
-          if !sec.incidents.isEmpty {
+          if !visibleIncidents.isEmpty {
             Spacer()
             Button("Clear Incident History", role: .destructive) {
-              sec.clearIncidents()
+              if s.demoModeEnabled {
+                sec.clearSimulatedIncidents()
+              } else {
+                sec.clearIncidents()
+              }
             }
           }
         }
-        if !sec.incidents.isEmpty {
-          ForEach(sec.incidents.prefix(8)) { inc in
+        if !visibleIncidents.isEmpty {
+          ForEach(visibleIncidents.prefix(8)) { inc in
             VStack(alignment: .leading, spacing: 3) {
               HStack {
                 Label(
-                  "\(inc.processName) (PID \(inc.pid)) — \(inc.capturedTypesDescription)",
+                  "\(demo.sanitizeLog(inc.processName)) (PID \(inc.pid)) — \(inc.capturedTypesDescription)",
                   systemImage: "exclamationmark.shield.fill"
                 )
                 .font(.callout.weight(.semibold))
@@ -597,7 +632,7 @@ struct NetworkPane: View {
               Text(demo.sanitizePath(inc.executablePath))
                 .font(.caption2.monospaced())
                 .foregroundStyle(.secondary)
-              Text("Remediation: \(inc.remediationSummary)")
+              Text("Remediation: \(demo.sanitizeLog(inc.remediationSummary))")
                 .font(.caption)
                 .foregroundStyle(inc.isResolved ? Theme.green : Theme.red)
             }
@@ -627,7 +662,8 @@ struct NotificationsPane: View {
     PaneContainer(pane: .notifications) {
       Section {
         SettingToggle(
-          title: "Enable notifications", caption: "System permission: \(authStatus)",
+          title: "Enable notifications",
+          caption: "System permission: \(s.demoModeEnabled ? "Authorized" : authStatus)",
           isOn: $s.notificationsEnabled)
         SettingToggle(title: "Play sound", isOn: $s.notificationSound)
           .disabled(!s.notificationsEnabled)
@@ -663,14 +699,24 @@ struct NotificationsPane: View {
         HStack {
           Text("Title")
           Spacer()
-          TextField("Title", text: $s.customNotifyTitle)
-            .textFieldStyle(.roundedBorder).frame(width: 300)
+          TextField(
+            "Title",
+            text: s.demoModeEnabled ? .constant("New Notification") : $s.customNotifyTitle
+          )
+          .textFieldStyle(.roundedBorder).frame(width: 300)
+          .disabled(s.demoModeEnabled)
         }
         HStack {
           SettingLabel(title: "Message", caption: "{device} is replaced with this Mac's name.")
           Spacer()
-          TextField("Message", text: $s.customNotifyBody)
-            .textFieldStyle(.roundedBorder).frame(width: 300)
+          TextField(
+            "Message",
+            text: s.demoModeEnabled
+              ? .constant("You have a new notification from {device}")
+              : $s.customNotifyBody
+          )
+          .textFieldStyle(.roundedBorder).frame(width: 300)
+          .disabled(s.demoModeEnabled)
         }
         SettingToggle(
           title: "Confirm locally when a notification is sent", isOn: $s.confirmSentNotification)
@@ -764,7 +810,9 @@ struct AdvancedPane: View {
             caption: "Includes every setting, peripherals and Macs. Great for setting up the second Mac.")
           Spacer()
           Button("Export…") { SettingsTransfer.export() }
+            .disabled(s.demoModeEnabled)
           Button("Import…") { SettingsTransfer.import() }
+            .disabled(s.demoModeEnabled)
         }
       }
 

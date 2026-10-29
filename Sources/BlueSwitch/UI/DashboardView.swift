@@ -20,7 +20,10 @@ struct DashboardView: View {
       header
       ScrollView {
         VStack(spacing: 12) {
-          if let latestIncident = sec.incidents.first {
+          if settings.demoModeEnabled {
+            demoBannerCard
+          }
+          if let latestIncident = demo.effectiveSecurityIncidents.first {
             Card {
               VStack(alignment: .leading, spacing: 6) {
                 HStack(spacing: 8) {
@@ -31,7 +34,7 @@ struct DashboardView: View {
                     Text("Security Alert: \(latestIncident.capturedTypesDescription) Monitor")
                       .font(.caption.weight(.bold))
                       .foregroundStyle(Theme.red)
-                    Text("\(latestIncident.processName) (PID \(latestIncident.pid))")
+                    Text("\(demo.sanitizeLog(latestIncident.processName)) (PID \(latestIncident.pid))")
                       .font(.caption2.weight(.semibold))
                   }
                   Spacer()
@@ -40,13 +43,13 @@ struct DashboardView: View {
                   }
                   .controlSize(.small)
                 }
-                Text("Remediation: \(latestIncident.remediationSummary)")
+                Text("Remediation: \(demo.sanitizeLog(latestIncident.remediationSummary))")
                   .font(.caption2)
                   .foregroundStyle(.secondary)
               }
             }
           }
-          if updates.hasNewerReleaseOnline, let tag = updates.latestVersionTag {
+          if !settings.demoModeEnabled, updates.hasNewerReleaseOnline, let tag = updates.latestVersionTag {
             Card {
               HStack(spacing: 10) {
                 Image(systemName: "arrow.down.circle.fill")
@@ -65,9 +68,6 @@ struct DashboardView: View {
                 .disabled(updates.isInstalling)
               }
             }
-          }
-          if settings.demoModeEnabled {
-            demoBannerCard
           }
           if !bt.isAuthorized && !settings.demoModeEnabled {
             Card { BluetoothPermissionBanner(compact: true) }

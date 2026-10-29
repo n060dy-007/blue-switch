@@ -47,7 +47,7 @@ struct PeripheralsPane: View {
         if let banner = lastDeviceTestBanner {
           HStack(spacing: 8) {
             Image(systemName: "checkmark.seal.fill").foregroundStyle(Theme.green)
-            Text(banner).font(.caption)
+            Text(demo.sanitizeLog(banner)).font(.caption)
             Spacer()
             Button("Dismiss") { lastDeviceTestBanner = nil }
               .buttonStyle(.borderless).font(.caption2)
@@ -69,10 +69,11 @@ struct PeripheralsPane: View {
       }
 
       Section {
-        if bt.availablePeripherals.isEmpty {
+        let availableList = demo.effectiveAvailablePeripherals
+        if availableList.isEmpty {
           EmptyStateRow(symbol: "dot.radiowaves.left.and.right", text: "No other paired devices found")
         } else {
-          ForEach(bt.availablePeripherals) { p in
+          ForEach(availableList) { p in
             HStack(spacing: 10) {
               Image(systemName: p.symbolName).frame(width: 24).foregroundStyle(.secondary)
               VStack(alignment: .leading, spacing: 1) {
@@ -87,6 +88,7 @@ struct PeripheralsPane: View {
               }
               .buttonStyle(.borderless)
               .foregroundStyle(Theme.blue)
+              .disabled(s.demoModeEnabled)
             }
           }
         }
@@ -158,7 +160,7 @@ struct PeripheralsPane: View {
                     pulsing: step.status == .running
                   )
                 }
-                Text(step.detail)
+                Text(demo.sanitizeLog(step.detail))
                   .font(.caption)
                   .foregroundStyle(.secondary)
               }
@@ -210,7 +212,7 @@ struct PeripheralsPane: View {
             Label("Clear Reliability Stats", systemImage: "chart.bar.xaxis")
           }
           Spacer()
-          Text("Session auto-heals: \(diag.totalAutoHealsSession)")
+          Text("Session auto-heals: \(s.demoModeEnabled ? 1 : diag.totalAutoHealsSession)")
             .font(.caption)
             .foregroundStyle(.secondary)
         }
@@ -231,8 +233,9 @@ struct PeripheralsPane: View {
           "Radio & Discoverability",
           (s.demoModeEnabled || diag.controllerInfo.isPoweredOn ? "Powered On" : "Powered Off")
             + " · "
-            + (diag.controllerInfo.isDiscoverable ? "Discoverable" : "Hidden (Non-Discoverable)")
-            + " · CoD \(diag.controllerInfo.classOfDeviceHex)"
+            + (!s.demoModeEnabled && diag.controllerInfo.isDiscoverable
+              ? "Discoverable" : "Hidden (Non-Discoverable)")
+            + " · CoD \(diag.controllerInfo.displayClassOfDeviceHex)"
         )
         btInfoRow(
           "Active HID Links",
@@ -297,6 +300,10 @@ struct PeripheralsPane: View {
       clicker.refreshPermission()
       diag.refreshTelemetry()
     }
+    .onChange(of: s.demoModeEnabled) { _ in
+      lastDeviceTestBanner = nil
+      diag.refreshTelemetry()
+    }
     .confirmationDialog("Remove all peripherals from BlueSwitch?", isPresented: $confirmRemoveAll) {
       Button("Remove All", role: .destructive) { bt.removeAll() }
     } message: {
@@ -345,19 +352,21 @@ private struct ManagedPeripheralRow: View {
           .foregroundStyle(connected ? Theme.blue : .secondary)
 
         VStack(alignment: .leading, spacing: 2) {
-          if editing {
+          if editing && !demo.isEnabled {
             TextField(peripheral.name, text: $alias, onCommit: commit)
               .textFieldStyle(.roundedBorder).frame(maxWidth: 220)
           } else {
             HStack(spacing: 4) {
               Text(demo.peripheralDisplayName(peripheral)).font(.body.weight(.medium))
-              Button {
-                alias = peripheral.alias
-                editing = true
-              } label: {
-                Image(systemName: "pencil").font(.caption)
+              if !demo.isEnabled {
+                Button {
+                  alias = peripheral.alias
+                  editing = true
+                } label: {
+                  Image(systemName: "pencil").font(.caption)
+                }
+                .buttonStyle(.borderless).foregroundStyle(.secondary).help("Rename")
               }
-              .buttonStyle(.borderless).foregroundStyle(.secondary).help("Rename")
             }
           }
           HStack(spacing: 6) {
@@ -405,7 +414,11 @@ private struct ManagedPeripheralRow: View {
         .help("Test Bluetooth link quality, encryption, and connection latency")
 
         Button(connected ? "Release" : "Connect") {
-          connected ? bt.release(peripheral) : bt.connect(peripheral)
+          if demo.isSimulatingSwitch {
+            demo.demoPeripheralsConnectedHere.toggle()
+          } else {
+            connected ? bt.release(peripheral) : bt.connect(peripheral)
+          }
         }
         .disabled(busy || testing)
         .help(connected ? "Release from this Mac (upstream: Remove from PC)" : "Connect to this Mac")
@@ -416,6 +429,7 @@ private struct ManagedPeripheralRow: View {
           Image(systemName: "minus.circle.fill").foregroundStyle(Theme.red)
         }
         .buttonStyle(.borderless)
+        .disabled(demo.isEnabled)
         .help("Remove from BlueSwitch")
       }
     }
@@ -476,15 +490,16 @@ struct DevicesPane: View {
       }
 
       Section {
-        if !s.discoveryEnabled {
+        let discoveredList = demo.effectiveDiscoveredPeers
+        if !s.discoveryEnabled && !s.demoModeEnabled {
           EmptyStateRow(symbol: "eye.slash", text: "Bonjour discovery is turned off (Network settings).")
-        } else if net.discovered.isEmpty {
+        } else if discoveredList.isEmpty {
           HStack(spacing: 10) {
             ProgressView().controlSize(.small)
             Text("Looking for other Macs running BlueSwitch…").foregroundStyle(.secondary)
           }
         } else {
-          ForEach(net.discovered) { peer in
+          ForEach(discoveredList) { peer in
             HStack(spacing: 10) {
               Image(systemName: "desktopcomputer").foregroundStyle(.secondary).frame(width: 24)
               VStack(alignment: .leading, spacing: 1) {
@@ -493,11 +508,11 @@ struct DevicesPane: View {
                   .font(.caption.monospaced()).foregroundStyle(.secondary)
               }
               Spacer()
-              StatusPill(
-                text: (net.reachability[peer.id] ?? .unknown).label,
-                color: (net.reachability[peer.id] ?? .unknown).color)
+              let reach = demo.reachability(for: peer)
+              StatusPill(text: reach.label, color: reach.color)
               Button("Register") { withAnimation { net.register(peer) } }
                 .buttonStyle(.borderedProminent)
+                .disabled(s.demoModeEnabled)
             }
           }
         }
@@ -507,16 +522,19 @@ struct DevicesPane: View {
 
       Section {
         HStack {
-          TextField("Name (optional)", text: $manualName)
-          TextField("Host or IP", text: $manualHost)
-          TextField("Port", text: $manualPort).frame(width: 80)
+          TextField("Name (optional)", text: s.demoModeEnabled ? .constant("") : $manualName)
+            .disabled(s.demoModeEnabled)
+          TextField("Host or IP", text: s.demoModeEnabled ? .constant("") : $manualHost)
+            .disabled(s.demoModeEnabled)
+          TextField("Port", text: s.demoModeEnabled ? .constant("") : $manualPort).frame(width: 80)
+            .disabled(s.demoModeEnabled)
           Button("Add") {
             if let port = Int(manualPort), !manualHost.isEmpty {
               net.addManual(name: manualName, host: manualHost, port: port)
               manualName = ""; manualHost = ""; manualPort = ""
             }
           }
-          .disabled(manualHost.isEmpty || Int(manualPort) == nil)
+          .disabled(s.demoModeEnabled || manualHost.isEmpty || Int(manualPort) == nil)
         }
         .textFieldStyle(.roundedBorder)
       } header: {
@@ -531,9 +549,11 @@ struct DevicesPane: View {
   private func peerRow(_ peer: PeerDevice) -> some View {
     let reach = demo.reachability(for: peer)
     let isTarget = demo.effectiveActivePeer?.id == peer.id
-    let outdated = updates.isPeerOutdated(peer)
-    let isUpdating = updates.updatingPeerIDs.contains(peer.id)
-    let supportsOTA = AppInfo.supportsNativeOTAUpdate(version: peer.appVersion)
+    let outdated = s.demoModeEnabled ? false : updates.isPeerOutdated(peer)
+    let isUpdating = s.demoModeEnabled ? false : updates.updatingPeerIDs.contains(peer.id)
+    let supportsOTA = s.demoModeEnabled ? true : AppInfo.supportsNativeOTAUpdate(version: peer.appVersion)
+    let displayPeerName = demo.peerDisplayName(peer)
+    let displayVer = s.demoModeEnabled ? AppInfo.version : peer.appVersion
     return VStack(alignment: .leading, spacing: 4) {
       HStack(spacing: 12) {
         Button {
@@ -558,13 +578,13 @@ struct DevicesPane: View {
 
         VStack(alignment: .leading, spacing: 2) {
           HStack(spacing: 6) {
-            Text(demo.peerDisplayName(peer)).font(.body.weight(.medium))
+            Text(displayPeerName).font(.body.weight(.medium))
             if isTarget {
               Text("TARGET").font(.system(size: 9, weight: .heavy))
                 .padding(.horizontal, 5).padding(.vertical, 1)
                 .background(Capsule().fill(Theme.blue.opacity(0.18))).foregroundStyle(Theme.blue)
             }
-            if let ver = peer.appVersion, !ver.isEmpty {
+            if let ver = displayVer, !ver.isEmpty {
               Text(outdated ? "v\(ver) → v\(AppInfo.version)" : "v\(ver)")
                 .font(.system(size: 9, weight: .bold))
                 .padding(.horizontal, 6).padding(.vertical, 1)
@@ -573,7 +593,7 @@ struct DevicesPane: View {
                 )
                 .foregroundStyle(outdated ? Theme.amber : .secondary)
             }
-            if peer.isManual {
+            if peer.isManual && !s.demoModeEnabled {
               Text("MANUAL").font(.system(size: 9, weight: .heavy))
                 .padding(.horizontal, 5).padding(.vertical, 1)
                 .background(Capsule().fill(Color.primary.opacity(0.1)))
@@ -595,51 +615,61 @@ struct DevicesPane: View {
           }
           .controlSize(.small)
           .help(
-            "\(peer.name) is on v\(peer.appVersion ?? "1.0.1") (before OTA updates existed). Click to upgrade it to v\(AppInfo.version) over SSH."
+            "\(displayPeerName) is on v\(displayVer ?? "1.0.1") (before OTA updates existed). Click to upgrade it to v\(AppInfo.version) over SSH."
           )
         } else {
           Button {
-            updates.pushUpdate(to: peer)
+            if !s.demoModeEnabled {
+              updates.pushUpdate(to: peer)
+            }
           } label: {
             Image(systemName: "arrow.up.doc.fill")
               .foregroundStyle(outdated ? Theme.amber : .primary)
           }
           .buttonStyle(.borderless)
-          .help("Push BlueSwitch v\(AppInfo.version) update to \(peer.name)")
+          .help("Push BlueSwitch v\(AppInfo.version) update to \(displayPeerName)")
         }
 
         Button {
-          net.ping(id: peer.id)
+          if !s.demoModeEnabled {
+            net.ping(id: peer.id)
+          }
         } label: {
           Image(systemName: "antenna.radiowaves.left.and.right")
         }
         .buttonStyle(.borderless).help("Check connection")
 
         Button {
-          SwitchCoordinator.shared.sendTestNotification(to: peer)
+          if !s.demoModeEnabled {
+            SwitchCoordinator.shared.sendTestNotification(to: peer)
+          }
         } label: {
           Image(systemName: "bell")
         }
-        .buttonStyle(.borderless).help("Notify — send a notification to this Mac")
+        .buttonStyle(.borderless).help("Notify — send a notification to \(displayPeerName)")
 
         Button {
-          SwitchCoordinator.shared.syncPeripherals(to: peer)
+          if !s.demoModeEnabled {
+            SwitchCoordinator.shared.syncPeripherals(to: peer)
+          }
         } label: {
           Image(systemName: "arrow.triangle.2.circlepath")
         }
-        .buttonStyle(.borderless).help("Sync this Mac's peripheral list to \(peer.name)")
-        .disabled(bt.peripherals.isEmpty)
+        .buttonStyle(.borderless).help("Sync this Mac's peripheral list to \(displayPeerName)")
+        .disabled(!s.demoModeEnabled && bt.peripherals.isEmpty)
 
         Button {
           withAnimation { net.remove(peer) }
         } label: {
           Image(systemName: "trash").foregroundStyle(Theme.red)
         }
-        .buttonStyle(.borderless).help("Remove")
+        .buttonStyle(.borderless)
+        .disabled(s.demoModeEnabled)
+        .help("Remove")
       }
-      if let statusText = updates.peerUpdateStatus[peer.id] {
+      if !s.demoModeEnabled, let statusText = updates.peerUpdateStatus[peer.id] {
         HStack(spacing: 8) {
-          Text(statusText).font(.caption).foregroundStyle(.secondary)
+          Text(demo.sanitizeLog(statusText)).font(.caption).foregroundStyle(.secondary)
           if !supportsOTA && peer.appVersion != nil {
             Button("Run SSH Upgrade…") { updates.bootstrapPeerViaSSH(peer) }
               .buttonStyle(.link).font(.caption)

@@ -50,23 +50,30 @@ struct BluetoothControllerSecurityInfo {
     return rawAddress
   }
 
+  var displayClassOfDeviceHex: String {
+    if DemoMode.shared.isEnabled {
+      return "0x38010C"
+    }
+    return classOfDeviceHex
+  }
+
   var securityPostureLabel: String {
-    if unencryptedActiveCount > 0 || unsolicitedHIDCount > 0 {
+    if !DemoMode.shared.isEnabled && (unencryptedActiveCount > 0 || unsolicitedHIDCount > 0) {
       return "Warning — Review Active Links"
     }
     if !isPoweredOn && !DemoMode.shared.isEnabled {
       return "Radio Off"
     }
-    return isDiscoverable
+    return isDiscoverable && !DemoMode.shared.isEnabled
       ? "Protected (Discoverable Mode On)"
       : "Hardened (Non-Discoverable · Link-Key Encrypted)"
   }
 
   var securityPostureColor: Color {
-    if unencryptedActiveCount > 0 || unsolicitedHIDCount > 0 {
+    if !DemoMode.shared.isEnabled && (unencryptedActiveCount > 0 || unsolicitedHIDCount > 0) {
       return Theme.red
     }
-    return isDiscoverable ? Theme.amber : Theme.green
+    return (isDiscoverable && !DemoMode.shared.isEnabled) ? Theme.amber : Theme.green
   }
 }
 
@@ -302,6 +309,11 @@ final class BluetoothDiagnosticsService: ObservableObject {
     UserDefaults.standard.removeObject(forKey: statsStorageKey)
     refreshTelemetry()
     Log.info("Cleared Bluetooth reliability & latency statistics", "Bluetooth")
+  }
+
+  func clearDiagnosticResults() {
+    diagnosticSteps.removeAll()
+    lastDiagnosticSummary = "Ready to run diagnostics"
   }
 
   // MARK: - Live Telemetry & Security Inspection

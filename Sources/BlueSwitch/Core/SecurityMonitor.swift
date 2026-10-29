@@ -317,7 +317,7 @@ final class SecurityMonitor: ObservableObject {
     )
 
     // 5. Modal Alert Dialog
-    if settings.securityModalAlerts {
+    if settings.securityModalAlerts && !DemoMode.shared.isEnabled {
       presentModalSecurityAlert(for: mutableIncident)
     }
   }
@@ -374,6 +374,10 @@ final class SecurityMonitor: ObservableObject {
     alertedPIDs.removeAll()
   }
 
+  func clearSimulatedIncidents() {
+    incidents.removeAll { $0.pid == -999 }
+  }
+
   /// Triggers a simulated keystroke & mouse-movement surveillance incident to verify
   /// notifications, alerts, logging, and auto-remediation end-to-end.
   func triggerSimulatedIncident() {
@@ -393,6 +397,10 @@ final class SecurityMonitor: ObservableObject {
       isResolved: true
     )
     incidents.insert(simulated, at: 0)
+    Log.demo(
+      .error, "Security",
+      "SIMULATED SECURITY ALERT: Keystrokes & Mouse Movement monitor test triggered — auto-remediation verified."
+    )
     recordAudit(
       category: "Security",
       message:

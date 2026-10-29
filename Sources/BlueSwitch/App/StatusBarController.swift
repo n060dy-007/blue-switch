@@ -33,11 +33,11 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         self?.openSettings(pane)
       }))
 
-    Publishers.CombineLatest3(
-      settings.$menuBarIcon, coordinator.$phase, bt.$refreshTick
+    Publishers.CombineLatest4(
+      settings.$menuBarIcon, coordinator.$phase, bt.$refreshTick, settings.$demoModeEnabled
     )
     .receive(on: DispatchQueue.main)
-    .sink { [weak self] icon, phase, _ in self?.updateIcon(icon, phase) }
+    .sink { [weak self] icon, phase, _, _ in self?.updateIcon(icon, phase) }
     .store(in: &cancellables)
   }
 
@@ -54,9 +54,13 @@ final class StatusBarController: NSObject, NSMenuDelegate {
       .withSymbolConfiguration(config)
     image?.isTemplate = true
     button.image = image
+    let connState = DemoMode.shared.effectiveConnectionState
     // Dim the icon when peripherals are not on this Mac.
-    button.appearsDisabled = bt.connectionState == .allDisconnected && !phase.isWorking
-    button.toolTip = "BlueSwitch — \(bt.connectionState.label)"
+    button.appearsDisabled = connState == .allDisconnected && !phase.isWorking
+    button.toolTip =
+      settings.demoModeEnabled
+      ? "BlueSwitch (DEMO) — \(connState.label)"
+      : "BlueSwitch — \(connState.label)"
   }
 
   // MARK: - Clicks

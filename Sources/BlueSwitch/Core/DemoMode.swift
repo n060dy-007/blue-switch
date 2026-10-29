@@ -1,7 +1,8 @@
 import Combine
 import Foundation
 
-/// Provides privacy redaction, scenario presets, and hands-free auto-play for public demos and screen recordings.
+/// Provides complete zero-leak privacy isolation, scenario presets, and hands-free auto-play
+/// for public demos and screen recordings.
 final class DemoMode: ObservableObject {
   static let shared = DemoMode()
 
@@ -13,6 +14,7 @@ final class DemoMode: ObservableObject {
   @Published private(set) var autoPlayCycleCount: Int = 0
 
   private var autoPlayTimer: Timer?
+  private var didSeedInitialDemoLogs = false
 
   private static let studioPeripherals: [BluetoothPeripheral] = [
     BluetoothPeripheral(
@@ -34,6 +36,23 @@ final class DemoMode: ObservableObject {
       id: "XX:XX:XX:XX:9B:44", name: "AirPods Max", alias: "", isEnabled: true),
   ]
 
+  /// Clean placeholder unpaired/available devices shown under "Paired With This Mac" in Demo Mode
+  /// so real personal phones, watches, headsets, TVs, and speakers are NEVER shown.
+  let sampleAvailablePeripherals: [BluetoothPeripheral] = [
+    BluetoothPeripheral(
+      id: "XX:XX:XX:XX:11:A4", name: "Magic Keyboard (Compact)", alias: "", isEnabled: true),
+    BluetoothPeripheral(
+      id: "XX:XX:XX:XX:22:C8", name: "Studio Wireless Headphones", alias: "", isEnabled: true),
+  ]
+
+  /// Clean placeholder Bonjour peer shown under "Discovered on This Network" in Demo Mode
+  /// so real LAN Macs on the user's home/office network are NEVER shown.
+  let sampleDiscoveredPeers: [PeerDevice] = [
+    PeerDevice(
+      id: "demo-discovered-imac", name: "Studio iMac 24\"", host: "10.0.1.62", port: 54820,
+      isManual: false, appVersion: AppInfo.version, appBuild: AppInfo.build)
+  ]
+
   private static let genericMacNames = [
     "MacBook Pro 16\"",
     "Mac Studio",
@@ -42,11 +61,30 @@ final class DemoMode: ObservableObject {
     "MacBook Air 15\"",
   ]
 
-  private init() {}
+  private init() {
+    if AppSettings.shared.demoModeEnabled {
+      ensureDemoLogsSeeded()
+    }
+  }
 
-  var isEnabled: Bool { AppSettings.shared.demoModeEnabled }
+  var isEnabled: Bool {
+    let on = AppSettings.shared.demoModeEnabled
+    if on && !didSeedInitialDemoLogs {
+      ensureDemoLogsSeeded()
+    }
+    return on
+  }
+
   var isSimulatingSwitch: Bool {
     AppSettings.shared.demoModeEnabled && AppSettings.shared.demoSimulateSwitching
+  }
+
+  private func ensureDemoLogsSeeded() {
+    didSeedInitialDemoLogs = true
+    Log.shared.seedDemoEntriesIfEmpty(
+      localName: effectiveDemoLocalAlias,
+      peerName: effectiveDemoPeerAlias
+    )
   }
 
   var samplePeripherals: [BluetoothPeripheral] {
@@ -89,17 +127,21 @@ final class DemoMode: ObservableObject {
   func toggle() {
     AppSettings.shared.demoModeEnabled.toggle()
     let state = AppSettings.shared.demoModeEnabled ? "ENABLED" : "DISABLED"
-    Log.info("Demo / Screen Recording Mode \(state)", "Demo")
+    BluetoothDiagnosticsService.shared.clearDiagnosticResults()
     if AppSettings.shared.demoModeEnabled {
+      ensureDemoLogsSeeded()
       applyScenario(AppSettings.shared.demoScenario)
+      Log.demo(.info, "Demo", "Demo Mode ENABLED — all personal, hardware & network info hidden")
     } else {
       stopAutoPlay()
+      Log.info("Demo / Screen Recording Mode \(state)", "App")
     }
   }
 
   func applyScenario(_ scenario: DemoScenario) {
     objectWillChange.send()
-    guard isEnabled else { return }
+    guard AppSettings.shared.demoModeEnabled else { return }
+    ensureDemoLogsSeeded()
     switch scenario {
     case .twoMacStudio, .threeMacDesk:
       activeDemoPeerID = "demo-macbook-pro"
@@ -127,11 +169,11 @@ final class DemoMode: ObservableObject {
     if !AppSettings.shared.demoSimulateSwitching {
       AppSettings.shared.demoSimulateSwitching = true
     }
+    ensureDemoLogsSeeded()
     isAutoPlaying = true
     autoPlayCycleCount = 0
-    Log.info("Started hands-free Demo Auto-Play loop", "Demo")
+    Log.demo(.info, "Demo", "Started hands-free Demo Auto-Play loop")
     rescheduleAutoPlayIfNeeded()
-    // Perform first simulated switch immediately so user gets instant visual feedback
     DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
       guard let self, self.isAutoPlaying else { return }
       self.performAutoPlayStep()
@@ -143,7 +185,7 @@ final class DemoMode: ObservableObject {
     autoPlayTimer = nil
     if isAutoPlaying {
       isAutoPlaying = false
-      Log.info("Stopped Demo Auto-Play loop", "Demo")
+      Log.demo(.info, "Demo", "Stopped Demo Auto-Play loop")
     }
   }
 
@@ -165,7 +207,6 @@ final class DemoMode: ObservableObject {
     guard !SwitchCoordinator.shared.phase.isWorking else { return }
     autoPlayCycleCount += 1
 
-    // In 3-Mac scenario, rotate target peer when bringing back to local Mac
     if demoPeripheralsConnectedHere == false {
       let peers = samplePeers
       if peers.count > 1, let idx = peers.firstIndex(where: { $0.id == activeDemoPeerID }) {
@@ -180,19 +221,23 @@ final class DemoMode: ObservableObject {
   func populateSampleLogs() {
     let local = localMacDisplayName
     let peer = effectiveDemoPeerAlias
-    Log.info("Bonjour service published as \(local) (_blueswitch._tcp · port 54820)", "Network")
-    Log.info("Discovered peer \(peer) at 10.0.1.24:54820 — AES-256-GCM authenticated", "Network")
-    Log.info("Bluetooth Link Security verified: 3/3 HID peripherals using Bonded AES/E0 encryption", "Bluetooth")
-    Log.info("Input Guard scanned active WindowServer taps: 0 unauthorized keystroke/mouse monitors", "Security")
-    Log.info("Switched Magic Keyboard with Touch ID, Magic Trackpad & Magic Mouse to \(peer) in 340 ms", "Switch")
+    Log.demo(.info, "Network", "Bonjour service published as \"\(local)\" (_blueswitch._tcp · port 54820)")
+    Log.demo(.info, "Network", "Discovered peer \(peer) at 10.0.1.24:54820 — AES-256-GCM authenticated")
+    Log.demo(.info, "Bluetooth", "Bluetooth Link Security verified: 3/3 HID peripherals using Bonded AES/E0 encryption")
+    Log.demo(.info, "Security", "Input Guard scanned active WindowServer taps: 0 unauthorized keystroke/mouse monitors")
+    Log.demo(.info, "Switch", "Switched Magic Keyboard with Touch ID, Magic Trackpad & Magic Mouse to \(peer) in 320 ms")
   }
 
   func resetDemoState() {
     stopAutoPlay()
     demoPeripheralsConnectedHere = true
     activeDemoPeerID = "demo-macbook-pro"
-    SecurityMonitor.shared.clearIncidents()
-    Log.info("Reset Demo Mode showcase state (peripherals connected to \(localMacDisplayName))", "Demo")
+    SecurityMonitor.shared.clearSimulatedIncidents()
+    Log.shared.seedDemoEntriesIfEmpty(
+      localName: effectiveDemoLocalAlias,
+      peerName: effectiveDemoPeerAlias
+    )
+    Log.demo(.info, "Demo", "Reset Demo Mode showcase state (peripherals connected to \(localMacDisplayName))")
   }
 
   // MARK: - Display Redaction Helpers
@@ -232,6 +277,7 @@ final class DemoMode: ObservableObject {
   func peerDisplayName(_ peer: PeerDevice) -> String {
     guard isEnabled else { return peer.name }
     if samplePeers.contains(where: { $0.id == peer.id }) { return peer.name }
+    if sampleDiscoveredPeers.contains(where: { $0.id == peer.id }) { return peer.name }
     if NetworkService.shared.activePeer?.id == peer.id {
       return effectiveDemoPeerAlias
     }
@@ -243,43 +289,45 @@ final class DemoMode: ObservableObject {
     guard isEnabled else {
       return peer.host.isEmpty ? "Address not resolved yet" : "\(peer.host):\(peer.port)"
     }
-    if samplePeers.contains(where: { $0.id == peer.id }) {
+    if samplePeers.contains(where: { $0.id == peer.id })
+      || sampleDiscoveredPeers.contains(where: { $0.id == peer.id })
+    {
       return "\(peer.host):\(peer.port) · AES-256-GCM"
     }
     let lastOctet = (abs(peer.id.hashValue) % 80) + 20
     return "10.0.1.\(lastOctet):54820 · AES-256-GCM"
   }
 
+  /// Never outputs any substring of a real peripheral's name or alias when Demo Mode is active.
   func peripheralDisplayName(_ p: BluetoothPeripheral) -> String {
     guard isEnabled else { return p.displayName }
-    return Self.stripPersonalOwnerPrefix(from: p.displayName)
+    if samplePeripherals.contains(where: { $0.id == p.id })
+      || sampleAvailablePeripherals.contains(where: { $0.id == p.id })
+    {
+      return p.name
+    }
+    return Self.genericHardwareLabel(for: p.name)
   }
 
   func peripheralSubtitle(_ p: BluetoothPeripheral) -> String {
     guard isEnabled else {
       return p.alias.isEmpty ? p.id : "\(p.name) · \(p.id)"
     }
-    let masked = Self.maskMAC(p.id)
-    let cleanName = Self.stripPersonalOwnerPrefix(from: p.name)
-    return p.alias.isEmpty ? masked : "\(cleanName) · \(masked)"
+    return Self.maskMAC(p.id)
   }
 
+  /// Always returns generic studio audio device names in Demo Mode so real AirPods/iPhone/USB interface names never show.
   func audioDeviceDisplayName(_ raw: String, isInput: Bool) -> String {
     guard isEnabled else { return raw }
-    let cleaned = Self.stripPersonalOwnerPrefix(from: raw)
-    if cleaned.lowercased().contains("iphone") || cleaned.lowercased().contains("ipad") {
-      return isInput ? "Studio Microphone" : "Studio Speakers"
-    }
-    return cleaned
+    return isInput ? "Studio Microphone" : "Studio Speakers"
   }
 
   func sanitizePath(_ path: String) -> String {
     guard isEnabled else { return path }
     let home = FileManager.default.homeDirectoryForCurrentUser.path
     var out = path.replacingOccurrences(of: home, with: "~")
-    let user = NSUserName()
-    if !user.isEmpty {
-      out = out.replacingOccurrences(of: user, with: "demo", options: .caseInsensitive)
+    for token in Self.personalWordTokens() {
+      out = out.replacingOccurrences(of: token, with: "demo", options: .caseInsensitive)
     }
     return out
   }
@@ -289,11 +337,26 @@ final class DemoMode: ObservableObject {
     var out = sanitizePath(text)
     let localAlias = effectiveDemoLocalAlias
 
-    // Scrub full name & username
+    // Scrub GitHub repository and owner slug (e.g. n060dy-007/blue-switch and n060dy-007)
+    let repo = AppSettings.shared.updateRepository.trimmingCharacters(in: .whitespacesAndNewlines)
+    if !repo.isEmpty {
+      out = out.replacingOccurrences(
+        of: repo, with: "demo-org/blue-switch", options: .caseInsensitive)
+      if let owner = repo.split(separator: "/").first, owner.count >= 3 {
+        out = out.replacingOccurrences(
+          of: String(owner), with: "demo-org", options: .caseInsensitive)
+      }
+    }
+
+    // Scrub full name, username, computer name, and individual name tokens
     for token in [NSFullUserName(), NSUserName(), Host.current().localizedName ?? ""]
     where !token.isEmpty {
       out = out.replacingOccurrences(of: token, with: localAlias, options: .caseInsensitive)
     }
+    for word in Self.personalWordTokens() {
+      out = out.replacingOccurrences(of: word, with: "Studio", options: .caseInsensitive)
+    }
+
     let customDev = AppSettings.shared.deviceName.trimmingCharacters(in: .whitespacesAndNewlines)
     if !customDev.isEmpty {
       out = out.replacingOccurrences(of: customDev, with: localAlias, options: .caseInsensitive)
@@ -315,32 +378,54 @@ final class DemoMode: ObservableObject {
     for p in BluetoothService.shared.peripherals + BluetoothService.shared.availablePeripherals {
       if !p.name.isEmpty {
         out = out.replacingOccurrences(
-          of: p.name, with: Self.stripPersonalOwnerPrefix(from: p.name), options: .caseInsensitive)
+          of: p.name, with: Self.genericHardwareLabel(for: p.name), options: .caseInsensitive)
+      }
+      if !p.alias.isEmpty {
+        out = out.replacingOccurrences(
+          of: p.alias, with: Self.genericHardwareLabel(for: p.name), options: .caseInsensitive)
       }
     }
 
-    // Mask Bluetooth MAC addresses (AA:BB:CC:DD:EE:FF or AA-BB-CC-DD-EE-FF)
+    // Scrub email addresses
+    if let emailRegex = try? NSRegularExpression(
+      pattern: "[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}")
+    {
+      let range = NSRange(out.startIndex..<out.endIndex, in: out)
+      out = emailRegex.stringByReplacingMatches(
+        in: out, range: range, withTemplate: "demo@example.com")
+    }
+
+    // Scrub .local Bonjour hostnames
+    if let localRegex = try? NSRegularExpression(
+      pattern: "\\b[A-Za-z0-9-]+\\.local\\.?\\b")
+    {
+      let range = NSRange(out.startIndex..<out.endIndex, in: out)
+      out = localRegex.stringByReplacingMatches(
+        in: out, range: range, withTemplate: "mac-studio.local")
+    }
+
+    // Mask Bluetooth MAC addresses completely (zero real octets preserved)
     if let macRegex = try? NSRegularExpression(
-      pattern: "\\b([0-9A-Fa-f]{2}[:-]){4}([0-9A-Fa-f]{2}[:-][0-9A-Fa-f]{2})\\b")
+      pattern: "\\b(?:[0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}\\b")
     {
       let range = NSRange(out.startIndex..<out.endIndex, in: out)
       out = macRegex.stringByReplacingMatches(
-        in: out, range: range, withTemplate: "XX:XX:XX:XX:$2")
+        in: out, range: range, withTemplate: "XX:XX:XX:XX:8A:1F")
     }
 
-    // Mask IPv4 addresses
+    // Mask IPv4 addresses completely
     if let ipRegex = try? NSRegularExpression(
-      pattern: "\\b(?:\\d{1,3}\\.){3}(\\d{1,3})\\b")
+      pattern: "\\b(?:\\d{1,3}\\.){3}\\d{1,3}\\b")
     {
       let range = NSRange(out.startIndex..<out.endIndex, in: out)
       out = ipRegex.stringByReplacingMatches(
-        in: out, range: range, withTemplate: "10.0.1.$1")
+        in: out, range: range, withTemplate: "10.0.1.24")
     }
 
     return out
   }
 
-  // MARK: - Effective Demo Collections for UI
+  // MARK: - Effective Isolated Collections for UI
 
   var effectivePeripherals: [BluetoothPeripheral] {
     if isSimulatingSwitch || (isEnabled && BluetoothService.shared.peripherals.isEmpty) {
@@ -349,11 +434,35 @@ final class DemoMode: ObservableObject {
     return BluetoothService.shared.peripherals
   }
 
+  /// Paired-but-unmanaged devices shown in `PeripheralsPane`: completely isolated from real OS paired devices in Demo Mode.
+  var effectiveAvailablePeripherals: [BluetoothPeripheral] {
+    if isEnabled {
+      return sampleAvailablePeripherals
+    }
+    return BluetoothService.shared.availablePeripherals
+  }
+
   var effectivePeers: [PeerDevice] {
     if isSimulatingSwitch || (isEnabled && NetworkService.shared.peers.isEmpty) {
       return samplePeers
     }
     return NetworkService.shared.peers
+  }
+
+  /// Discovered Bonjour Macs shown in `DevicesPane`: completely isolated from real LAN Macs in Demo Mode.
+  var effectiveDiscoveredPeers: [PeerDevice] {
+    if isEnabled {
+      return sampleDiscoveredPeers
+    }
+    return NetworkService.shared.discovered
+  }
+
+  /// Security incidents shown on `DashboardView` & `NetworkPane`: hides all real local process event-tap alerts in Demo Mode.
+  var effectiveSecurityIncidents: [SecurityIncident] {
+    if isEnabled {
+      return SecurityMonitor.shared.incidents.filter { $0.pid == -999 }
+    }
+    return SecurityMonitor.shared.incidents
   }
 
   var effectiveActivePeer: PeerDevice? {
@@ -378,32 +487,59 @@ final class DemoMode: ObservableObject {
   }
 
   func reachability(for peer: PeerDevice) -> PeerReachability {
-    if isSimulatingSwitch || samplePeers.contains(where: { $0.id == peer.id }) {
+    if isEnabled {
       return .online
     }
     return NetworkService.shared.reachability[peer.id] ?? .unknown
   }
 
-  // MARK: - String Helpers
+  // MARK: - Deterministic Zero-Leak Helpers
 
+  /// Replaces any real Bluetooth MAC with a deterministic synthetic `XX:XX:XX:XX:HH:HH` string (0 real bytes preserved).
   static func maskMAC(_ id: String) -> String {
     if id.hasPrefix("XX:") { return id }
-    let suffix = id.suffix(5)
-    return "XX:XX:XX:XX:\(suffix)"
+    var hash: UInt64 = 1_469_598_103_934_665_603
+    for b in id.uppercased().utf8 {
+      hash ^= UInt64(b)
+      hash &*= 1_099_511_628_211
+    }
+    let b1 = UInt8((hash >> 8) & 0xFF)
+    let b2 = UInt8(hash & 0xFF)
+    return String(format: "XX:XX:XX:XX:%02X:%02X", b1, b2)
   }
 
-  /// Strips possessive prefixes like `"Gregory's Magic Keyboard"` -> `"Magic Keyboard"`.
+  /// Maps any hardware name to a 100% generic product type without echoing any user-defined substring.
+  static func genericHardwareLabel(for rawName: String) -> String {
+    let lower = rawName.lowercased()
+    if lower.contains("keyboard") { return "Magic Keyboard" }
+    if lower.contains("trackpad") { return "Magic Trackpad" }
+    if lower.contains("mouse") { return "Magic Mouse" }
+    if lower.contains("airpods") || lower.contains("headphone") || lower.contains("beats")
+      || lower.contains("buds")
+    {
+      return "Studio Wireless Headphones"
+    }
+    return "Bluetooth Peripheral"
+  }
+
   static func stripPersonalOwnerPrefix(from name: String) -> String {
-    for sep in ["’s ", "'s "] {
-      if let range = name.range(of: sep) {
-        let remainder = String(name[range.upperBound...]).trimmingCharacters(in: .whitespaces)
-        if !remainder.isEmpty { return remainder }
+    genericHardwareLabel(for: name)
+  }
+
+  private static func personalWordTokens() -> [String] {
+    let genericMacWords: Set<String> = [
+      "mac", "macbook", "pro", "air", "mini", "studio", "imac", "local", "apple", "computer", "the",
+    ]
+    var tokens: Set<String> = []
+    let sources =
+      [NSFullUserName(), NSUserName(), Host.current().localizedName ?? ""] + Host.current().names
+    for src in sources where !src.isEmpty {
+      tokens.insert(src)
+      let parts = src.components(separatedBy: CharacterSet.alphanumerics.inverted)
+      for part in parts where part.count >= 3 && !genericMacWords.contains(part.lowercased()) {
+        tokens.insert(part)
       }
     }
-    let user = NSUserName()
-    if !user.isEmpty && name.localizedCaseInsensitiveContains(user) {
-      return name.replacingOccurrences(of: user, with: "Studio", options: .caseInsensitive)
-    }
-    return name
+    return tokens.sorted { $0.count > $1.count }
   }
 }

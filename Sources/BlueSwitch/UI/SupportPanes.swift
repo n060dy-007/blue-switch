@@ -11,7 +11,7 @@ struct ActivityPane: View {
   @State private var search = ""
 
   private var filtered: [LogEntry] {
-    log.entries.reversed().filter { e in
+    log.visibleEntries.reversed().filter { e in
       e.level >= filter
         && (search.isEmpty || e.displayMessage.localizedCaseInsensitiveContains(search)
           || e.category.localizedCaseInsensitiveContains(search))
@@ -35,7 +35,7 @@ struct ActivityPane: View {
         }
         Button(action: save) { Label("Save…", systemImage: "square.and.arrow.down") }
         Button(role: .destructive) {
-          log.clear()
+          log.clearVisible()
         } label: {
           Label("Clear", systemImage: "trash")
         }
@@ -66,9 +66,14 @@ struct ActivityPane: View {
       .padding(.bottom, 20)
 
       HStack {
-        Text("Recording level: \(s.logLevel.label) · change in Advanced").font(.caption).foregroundStyle(.secondary)
+        Text(
+          s.demoModeEnabled
+            ? "Demo Activity Log (isolated — real session logs hidden)"
+            : "Recording level: \(s.logLevel.label) · change in Advanced"
+        )
+        .font(.caption).foregroundStyle(.secondary)
         Spacer()
-        Text("\(log.entries.count) entries").font(.caption).foregroundStyle(.secondary)
+        Text("\(log.visibleEntries.count) entries").font(.caption).foregroundStyle(.secondary)
       }
       .padding(.horizontal, 28).padding(.bottom, 14)
     }
