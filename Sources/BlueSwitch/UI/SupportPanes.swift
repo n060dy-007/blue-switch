@@ -171,3 +171,166 @@ struct AboutPane: View {
     }
   }
 }
+
+// MARK: - Demo Mode
+
+struct DemoPane: View {
+  @ObservedObject private var s = AppSettings.shared
+  @ObservedObject private var demo = DemoMode.shared
+  @ObservedObject private var diag = BluetoothDiagnosticsService.shared
+  @ObservedObject private var sec = SecurityMonitor.shared
+  @ObservedObject private var coordinator = SwitchCoordinator.shared
+
+  var body: some View {
+    PaneContainer(pane: .demo) {
+      Section {
+        SettingToggle(
+          title: "Enable Demo Mode (Privacy Redaction & Showcase)",
+          caption:
+            "Immediately masks your real Mac name, Bonjour hostnames, IPv4 addresses, Bluetooth MACs, pairing keys, and macOS username across the Dashboard, Menu Bar, Settings, and Activity Log.",
+          isOn: $s.demoModeEnabled
+        )
+        SettingToggle(
+          title: "Simulate live peripheral switching (Keep real keyboard & mouse connected)",
+          caption:
+            "Animates peripheral handoffs, status indicators, and audio mute rules live on camera without disconnecting your physical keyboard, trackpad, or mouse.",
+          isOn: $s.demoSimulateSwitching
+        )
+        .disabled(!s.demoModeEnabled)
+      } header: {
+        HStack {
+          Text("Demo Mode Status")
+          Spacer()
+          StatusPill(
+            text: s.demoModeEnabled
+              ? (demo.isAutoPlaying ? "Auto-Playing Showcase" : "Demo Mode Active")
+              : "Off (Live Hardware)",
+            color: s.demoModeEnabled ? Theme.amber : .secondary,
+            pulsing: demo.isAutoPlaying
+          )
+        }
+      }
+
+      Section("Scenario Presets & Alias Names") {
+        Picker("Showcase Scenario", selection: $s.demoScenario) {
+          ForEach(DemoScenario.allCases) { sc in
+            Text(sc.label).tag(sc)
+          }
+        }
+        .disabled(!s.demoModeEnabled)
+
+        HStack {
+          SettingLabel(
+            title: "This Mac demo name",
+            caption: "Displayed instead of your real computer name when Demo Mode is on."
+          )
+          Spacer()
+          TextField("Mac Studio", text: $s.demoLocalMacName)
+            .textFieldStyle(.roundedBorder)
+            .frame(width: 220)
+        }
+        .disabled(!s.demoModeEnabled)
+
+        HStack {
+          SettingLabel(
+            title: "Target Mac demo name",
+            caption: "Displayed as the primary target Mac in the switcher and menu bar."
+          )
+          Spacer()
+          TextField("MacBook Pro 16\"", text: $s.demoPeerMacName)
+            .textFieldStyle(.roundedBorder)
+            .frame(width: 220)
+        }
+        .disabled(!s.demoModeEnabled)
+      }
+
+      Section("Hands-Free Auto-Play & Live Demo Actions") {
+        HStack {
+          VStack(alignment: .leading, spacing: 2) {
+            Text("Hands-Free Auto-Play Demo Loop").font(.body.weight(.medium))
+            Text(
+              "Automatically alternates peripheral switches between Macs every few seconds — ideal for recording product walkthroughs."
+            )
+            .font(.caption).foregroundStyle(.secondary)
+          }
+          Spacer()
+          Button {
+            demo.toggleAutoPlay()
+          } label: {
+            Label(
+              demo.isAutoPlaying ? "Stop Auto-Play" : "Start Auto-Play",
+              systemImage: demo.isAutoPlaying ? "stop.fill" : "play.fill"
+            )
+          }
+          .buttonStyle(.borderedProminent)
+          .tint(demo.isAutoPlaying ? Theme.red : Theme.amber)
+        }
+
+        SettingSlider(
+          title: "Auto-play switch interval",
+          caption: "Seconds between simulated peripheral handoffs during Auto-Play.",
+          value: $s.demoAutoPlayInterval,
+          range: 3...20,
+          step: 1
+        )
+
+        HStack(spacing: 10) {
+          Button {
+            if !s.demoModeEnabled { s.demoModeEnabled = true }
+            coordinator.switchDevices()
+          } label: {
+            Label("Simulate Switch", systemImage: "arrow.left.arrow.right")
+          }
+          .disabled(coordinator.phase.isWorking)
+
+          Button {
+            if !s.demoModeEnabled { s.demoModeEnabled = true }
+            diag.runFullDiagnosticSuite()
+            SettingsNavigation.shared.selection = .peripherals
+          } label: {
+            Label("Run Diagnostic Demo", systemImage: "stethoscope")
+          }
+
+          Button {
+            if !s.demoModeEnabled { s.demoModeEnabled = true }
+            sec.triggerSimulatedIncident()
+          } label: {
+            Label("Simulate Security Alert", systemImage: "exclamationmark.shield")
+          }
+
+          Button {
+            if !s.demoModeEnabled { s.demoModeEnabled = true }
+            demo.populateSampleLogs()
+          } label: {
+            Label("Add Sample Logs", systemImage: "text.append")
+          }
+
+          Spacer()
+
+          Button("Reset Demo") {
+            demo.resetDemoState()
+          }
+        }
+      }
+
+      Section("Active Privacy Redaction Checklist") {
+        redactionRow("Local Computer & Bonjour Name", "Shown as \"\(demo.localMacDisplayName)\"")
+        redactionRow("Peer Mac Names & IPv4 Hosts", "Shown as \"\(s.demoPeerMacName)\" · 10.0.1.24:54820")
+        redactionRow("Bluetooth Peripheral & HCI MACs", "Masked as XX:XX:XX:XX:8A:1F (owner prefix stripped)")
+        redactionRow("Filesystem Paths & Usernames", "Sanitized to ~/Library/Logs/BlueSwitch/…")
+        redactionRow("Network Pairing Key & Repo Feed", "Locked as •••••••••••• · demo-org/blue-switch")
+      }
+    }
+  }
+
+  private func redactionRow(_ title: String, _ preview: String) -> some View {
+    HStack {
+      Label(title, systemImage: "checkmark.shield.fill")
+        .foregroundStyle(s.demoModeEnabled ? Theme.green : .secondary)
+      Spacer()
+      Text(preview)
+        .font(.caption.monospaced())
+        .foregroundStyle(.secondary)
+    }
+  }
+}

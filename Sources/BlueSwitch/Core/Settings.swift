@@ -91,6 +91,25 @@ enum AppearanceMode: String, CaseIterable, Identifiable {
   }
 }
 
+enum DemoScenario: String, CaseIterable, Identifiable {
+  case twoMacStudio
+  case threeMacDesk
+  case securityShowcase
+
+  var id: String { rawValue }
+
+  var label: String {
+    switch self {
+    case .twoMacStudio:
+      return "Two-Mac Studio Setup (Mac Studio ↔ MacBook Pro 16\")"
+    case .threeMacDesk:
+      return "Multi-Mac Workstation (3 Macs · 4 Peripherals)"
+    case .securityShowcase:
+      return "Security & Threat Defense Showcase"
+    }
+  }
+}
+
 enum LogLevel: Int, CaseIterable, Identifiable, Comparable {
   case debug = 0, info, warning, error
   var id: Int { rawValue }
@@ -143,6 +162,7 @@ final class AppSettings: ObservableObject {
     case confirmBeforeSwitching, autoCheckUpdates, autoInstallUpdates, updateRepository
     case autoUpdatePeers, allowRemoteUpdates
     case demoModeEnabled, demoSimulateSwitching
+    case demoScenario, demoLocalMacName, demoPeerMacName, demoAutoPlayInterval
     // Switching & Audio
     case disconnectMethod, disconnectPollInterval, disconnectMaxAttempts
     case connectRetryCount, connectRetryDelay, settleDelay, pairAttemptTimeout, requireInRange
@@ -217,6 +237,9 @@ final class AppSettings: ObservableObject {
   @Published var demoModeEnabled: Bool = AppSettings.load(.demoModeEnabled, false) {
     didSet {
       Self.save(.demoModeEnabled, demoModeEnabled)
+      if !demoModeEnabled {
+        DemoMode.shared.stopAutoPlay()
+      }
       DemoMode.shared.objectWillChange.send()
     }
   }
@@ -224,6 +247,32 @@ final class AppSettings: ObservableObject {
     didSet {
       Self.save(.demoSimulateSwitching, demoSimulateSwitching)
       DemoMode.shared.objectWillChange.send()
+    }
+  }
+  @Published var demoScenario: DemoScenario = AppSettings.loadEnum(
+    .demoScenario, DemoScenario.twoMacStudio)
+  {
+    didSet {
+      Self.save(.demoScenario, demoScenario.rawValue)
+      DemoMode.shared.applyScenario(demoScenario)
+    }
+  }
+  @Published var demoLocalMacName: String = AppSettings.load(.demoLocalMacName, "Mac Studio") {
+    didSet {
+      Self.save(.demoLocalMacName, demoLocalMacName)
+      DemoMode.shared.objectWillChange.send()
+    }
+  }
+  @Published var demoPeerMacName: String = AppSettings.load(.demoPeerMacName, "MacBook Pro 16\"") {
+    didSet {
+      Self.save(.demoPeerMacName, demoPeerMacName)
+      DemoMode.shared.objectWillChange.send()
+    }
+  }
+  @Published var demoAutoPlayInterval: Double = AppSettings.load(.demoAutoPlayInterval, 6.0) {
+    didSet {
+      Self.save(.demoAutoPlayInterval, demoAutoPlayInterval)
+      DemoMode.shared.rescheduleAutoPlayIfNeeded()
     }
   }
 
@@ -466,6 +515,8 @@ final class AppSettings: ObservableObject {
     updateRepository = "n060dy-007/blue-switch"
     autoUpdatePeers = true; allowRemoteUpdates = true
     demoModeEnabled = false; demoSimulateSwitching = true
+    demoScenario = .twoMacStudio; demoLocalMacName = "Mac Studio"
+    demoPeerMacName = "MacBook Pro 16\""; demoAutoPlayInterval = 6.0
     disconnectMethod = .unpair; disconnectPollInterval = 0.5; disconnectMaxAttempts = 5
     connectRetryCount = 4; connectRetryDelay = 1.0; settleDelay = 0.8; pairAttemptTimeout = 5.0
     requireInRange = false

@@ -1,7 +1,7 @@
 import SwiftUI
 
 enum SettingsPane: String, CaseIterable, Identifiable {
-  case general, switching, peripherals, devices, network, notifications, shortcuts, advanced
+  case general, switching, peripherals, devices, network, notifications, shortcuts, demo, advanced
   case activity, about
 
   var id: String { rawValue }
@@ -15,6 +15,7 @@ enum SettingsPane: String, CaseIterable, Identifiable {
     case .network: return "Network"
     case .notifications: return "Notifications"
     case .shortcuts: return "Shortcuts"
+    case .demo: return "Demo Mode"
     case .advanced: return "Advanced"
     case .activity: return "Activity Log"
     case .about: return "About"
@@ -30,6 +31,7 @@ enum SettingsPane: String, CaseIterable, Identifiable {
     case .network: return "Discovery, ports, timeouts and security"
     case .notifications: return "Which events alert you, and how"
     case .shortcuts: return "System-wide keyboard shortcuts"
+    case .demo: return "Privacy redaction, scenario presets & hands-free showcase"
     case .advanced: return "Logging, diagnostics, backup and reset"
     case .activity: return "Live log of what BlueSwitch is doing"
     case .about: return "Version, credits and license"
@@ -45,6 +47,7 @@ enum SettingsPane: String, CaseIterable, Identifiable {
     case .network: return "network"
     case .notifications: return "bell.badge.fill"
     case .shortcuts: return "command"
+    case .demo: return "video.fill"
     case .advanced: return "wrench.and.screwdriver.fill"
     case .activity: return "list.bullet.rectangle.fill"
     case .about: return "info.circle.fill"
@@ -60,6 +63,7 @@ enum SettingsPane: String, CaseIterable, Identifiable {
     case .network: return Theme.green
     case .notifications: return Theme.red
     case .shortcuts: return .purple
+    case .demo: return Theme.amber
     case .advanced: return .orange
     case .activity: return .teal
     case .about: return Theme.blue
@@ -68,7 +72,7 @@ enum SettingsPane: String, CaseIterable, Identifiable {
 
   static let groups: [(String, [SettingsPane])] = [
     ("Setup", [.peripherals, .devices]),
-    ("Preferences", [.general, .switching, .network, .notifications, .shortcuts]),
+    ("Preferences", [.general, .switching, .network, .notifications, .shortcuts, .demo]),
     ("Support", [.advanced, .activity, .about]),
   ]
 }
@@ -143,6 +147,12 @@ struct SettingsRootView: View {
         badge("\(demo.effectivePeripherals.count)")
       } else if pane == .devices, !demo.effectivePeers.isEmpty {
         badge("\(demo.effectivePeers.count)")
+      } else if pane == .demo, demo.isEnabled {
+        Text(demo.isAutoPlaying ? "AUTO" : "ON")
+          .font(.caption2.weight(.black))
+          .padding(.horizontal, 6).padding(.vertical, 1)
+          .background(Capsule().fill(Theme.amber))
+          .foregroundStyle(.black)
       }
     }
   }
@@ -161,6 +171,7 @@ struct SettingsRootView: View {
     case .network: NetworkPane()
     case .notifications: NotificationsPane()
     case .shortcuts: ShortcutsPane()
+    case .demo: DemoPane()
     case .advanced: AdvancedPane()
     case .activity: ActivityPane()
     case .about: AboutPane()

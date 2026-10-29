@@ -66,10 +66,15 @@ struct DashboardView: View {
               }
             }
           }
-          if !bt.isAuthorized {
+          if settings.demoModeEnabled {
+            demoBannerCard
+          }
+          if !bt.isAuthorized && !settings.demoModeEnabled {
             Card { BluetoothPermissionBanner(compact: true) }
           }
-          if settings.autoAcceptBluetoothRequests && !clicker.isAccessibilityTrusted {
+          if settings.autoAcceptBluetoothRequests && !clicker.isAccessibilityTrusted
+            && !settings.demoModeEnabled
+          {
             Card { AccessibilityPermissionBanner(compact: true) }
           }
           switchCard
@@ -84,6 +89,52 @@ struct DashboardView: View {
     .onAppear {
       clicker.refreshPermission()
       audio.refresh()
+    }
+  }
+
+  private var demoBannerCard: some View {
+    Card {
+      VStack(alignment: .leading, spacing: 8) {
+        HStack(spacing: 8) {
+          Image(systemName: "video.fill")
+            .foregroundStyle(Theme.amber)
+          VStack(alignment: .leading, spacing: 1) {
+            Text(demo.isAutoPlaying ? "Demo Auto-Play Running" : "Demo Mode Active")
+              .font(.caption.weight(.bold))
+            Text("Personal names, MACs, IPs & paths are hidden")
+              .font(.caption2)
+              .foregroundStyle(.secondary)
+          }
+          Spacer()
+          Button("Exit") {
+            demo.toggle()
+          }
+          .controlSize(.mini)
+        }
+        HStack(spacing: 8) {
+          Button {
+            demo.toggleAutoPlay()
+          } label: {
+            Label(
+              demo.isAutoPlaying ? "Stop Auto" : "Auto-Play",
+              systemImage: demo.isAutoPlaying ? "stop.fill" : "play.fill"
+            )
+            .font(.caption2.weight(.semibold))
+          }
+          .controlSize(.small)
+          .buttonStyle(.borderedProminent)
+          .tint(demo.isAutoPlaying ? Theme.red : Theme.amber)
+
+          Button {
+            openSettings(.demo)
+          } label: {
+            Label("Demo Options…", systemImage: "slider.horizontal.3")
+              .font(.caption2)
+          }
+          .controlSize(.small)
+          Spacer()
+        }
+      }
     }
   }
 
@@ -192,11 +243,17 @@ struct DashboardView: View {
         Button {
           demo.toggle()
         } label: {
-          Image(systemName: settings.demoModeEnabled ? "eye.slash.fill" : "eye")
-            .font(.caption.weight(.bold))
-            .padding(6)
-            .background(Circle().fill(.white.opacity(settings.demoModeEnabled ? 0.32 : 0.16)))
-            .foregroundStyle(.white)
+          HStack(spacing: 4) {
+            Image(systemName: settings.demoModeEnabled ? "video.fill" : "eye.slash")
+            Text(settings.demoModeEnabled ? "DEMO ON" : "Demo")
+          }
+          .font(.caption2.weight(.bold))
+          .padding(.horizontal, 8).padding(.vertical, 5)
+          .background(
+            Capsule().fill(
+              settings.demoModeEnabled ? Theme.amber : .white.opacity(0.18))
+          )
+          .foregroundStyle(settings.demoModeEnabled ? .black : .white)
         }
         .buttonStyle(.plain)
         .help(
@@ -403,6 +460,13 @@ struct DashboardView: View {
         openSettings(nil)
       } label: {
         Label("Settings", systemImage: "gearshape")
+      }
+      Spacer()
+      Button {
+        openSettings(.demo)
+      } label: {
+        Label("Demo", systemImage: settings.demoModeEnabled ? "video.fill" : "video")
+          .foregroundStyle(settings.demoModeEnabled ? Theme.amber : .primary)
       }
       Spacer()
       Button {

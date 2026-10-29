@@ -183,9 +183,19 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         ? "Disable Demo Mode (Personal Info Hidden)"
         : "Enable Demo Mode (For Screen Recording)",
       #selector(toggleDemoModeAction),
-      symbol: settings.demoModeEnabled ? "eye.slash.fill" : "video.badge.checkmark")
+      symbol: settings.demoModeEnabled ? "video.fill" : "video.badge.checkmark")
     demoItem.state = settings.demoModeEnabled ? .on : .off
     menu.addItem(demoItem)
+
+    let autoPlayItem = item(
+      DemoMode.shared.isAutoPlaying ? "Stop Demo Auto-Play Loop" : "Start Demo Auto-Play Loop",
+      #selector(toggleDemoAutoPlayAction),
+      symbol: DemoMode.shared.isAutoPlaying ? "stop.circle.fill" : "play.circle")
+    menu.addItem(autoPlayItem)
+
+    menu.addItem(
+      item("Demo Mode Options…", #selector(openDemoSettingsAction), symbol: "slider.horizontal.3"))
+    menu.addItem(.separator())
 
     menu.addItem(item("Open Dashboard", #selector(openDashboard), symbol: "rectangle.grid.2x2"))
     let s = item("Settings…", #selector(openSettingsAction), symbol: "gearshape")
@@ -222,6 +232,8 @@ final class StatusBarController: NSObject, NSMenuDelegate {
   @objc private func toggleMicMuteAction() { AudioService.shared.toggleMicMute() }
   @objc private func toggleSpeakersMuteAction() { AudioService.shared.toggleSpeakersMute() }
   @objc private func toggleDemoModeAction() { DemoMode.shared.toggle() }
+  @objc private func toggleDemoAutoPlayAction() { DemoMode.shared.toggleAutoPlay() }
+  @objc private func openDemoSettingsAction() { openSettings(.demo) }
   @objc private func openDashboard() {
     DispatchQueue.main.async { self.togglePopover() }
   }

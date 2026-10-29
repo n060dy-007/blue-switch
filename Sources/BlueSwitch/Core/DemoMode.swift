@@ -1,15 +1,20 @@
 import Combine
 import Foundation
 
-/// Provides privacy redaction and interactive showcase state for public screen recordings and demos.
+/// Provides privacy redaction, scenario presets, and hands-free auto-play for public demos and screen recordings.
 final class DemoMode: ObservableObject {
   static let shared = DemoMode()
 
-  /// Sample peripherals shown in Demo Mode when `demoSimulateSwitching` is active (or when no real peripherals are registered).
+  /// Sample peripheral connection state when `demoSimulateSwitching` is active.
   @Published var demoPeripheralsConnectedHere: Bool = true
   @Published var activeDemoPeerID: String = "demo-macbook-pro"
+  /// Whether hands-free Auto-Play Demo Loop is currently running.
+  @Published private(set) var isAutoPlaying: Bool = false
+  @Published private(set) var autoPlayCycleCount: Int = 0
 
-  let samplePeripherals: [BluetoothPeripheral] = [
+  private var autoPlayTimer: Timer?
+
+  private static let studioPeripherals: [BluetoothPeripheral] = [
     BluetoothPeripheral(
       id: "XX:XX:XX:XX:8A:1F", name: "Magic Keyboard with Touch ID", alias: "", isEnabled: true),
     BluetoothPeripheral(
@@ -18,13 +23,15 @@ final class DemoMode: ObservableObject {
       id: "XX:XX:XX:XX:2E:07", name: "Magic Mouse", alias: "", isEnabled: true),
   ]
 
-  let samplePeers: [PeerDevice] = [
-    PeerDevice(
-      id: "demo-macbook-pro", name: "MacBook Pro 16\"", host: "10.0.1.24", port: 54820,
-      isManual: false, appVersion: AppInfo.version, appBuild: AppInfo.build),
-    PeerDevice(
-      id: "demo-mac-mini", name: "Studio Mac mini", host: "10.0.1.38", port: 54820,
-      isManual: false, appVersion: AppInfo.version, appBuild: AppInfo.build),
+  private static let multiMacPeripherals: [BluetoothPeripheral] = [
+    BluetoothPeripheral(
+      id: "XX:XX:XX:XX:8A:1F", name: "Magic Keyboard with Numeric Keypad", alias: "", isEnabled: true),
+    BluetoothPeripheral(
+      id: "XX:XX:XX:XX:4C:92", name: "Magic Trackpad (USB-C)", alias: "", isEnabled: true),
+    BluetoothPeripheral(
+      id: "XX:XX:XX:XX:2E:07", name: "Magic Mouse (USB-C)", alias: "", isEnabled: true),
+    BluetoothPeripheral(
+      id: "XX:XX:XX:XX:9B:44", name: "AirPods Max", alias: "", isEnabled: true),
   ]
 
   private static let genericMacNames = [
@@ -42,22 +49,172 @@ final class DemoMode: ObservableObject {
     AppSettings.shared.demoModeEnabled && AppSettings.shared.demoSimulateSwitching
   }
 
+  var samplePeripherals: [BluetoothPeripheral] {
+    switch AppSettings.shared.demoScenario {
+    case .twoMacStudio, .securityShowcase:
+      return Self.studioPeripherals
+    case .threeMacDesk:
+      return Self.multiMacPeripherals
+    }
+  }
+
+  var samplePeers: [PeerDevice] {
+    let primaryName = effectiveDemoPeerAlias
+    let base: [PeerDevice] = [
+      PeerDevice(
+        id: "demo-macbook-pro", name: primaryName, host: "10.0.1.24", port: 54820,
+        isManual: false, appVersion: AppInfo.version, appBuild: AppInfo.build)
+    ]
+    switch AppSettings.shared.demoScenario {
+    case .twoMacStudio:
+      return base
+    case .threeMacDesk:
+      return base + [
+        PeerDevice(
+          id: "demo-mac-mini", name: "Studio Mac mini M4", host: "10.0.1.38", port: 54820,
+          isManual: false, appVersion: AppInfo.version, appBuild: AppInfo.build),
+        PeerDevice(
+          id: "demo-macbook-air", name: "MacBook Air 15\"", host: "10.0.1.51", port: 54820,
+          isManual: false, appVersion: AppInfo.version, appBuild: AppInfo.build),
+      ]
+    case .securityShowcase:
+      return base + [
+        PeerDevice(
+          id: "demo-mac-mini", name: "Secure Lab Mac mini", host: "10.0.1.38", port: 54820,
+          isManual: false, appVersion: AppInfo.version, appBuild: AppInfo.build)
+      ]
+    }
+  }
+
   func toggle() {
     AppSettings.shared.demoModeEnabled.toggle()
     let state = AppSettings.shared.demoModeEnabled ? "ENABLED" : "DISABLED"
     Log.info("Demo / Screen Recording Mode \(state)", "Demo")
+    if AppSettings.shared.demoModeEnabled {
+      applyScenario(AppSettings.shared.demoScenario)
+    } else {
+      stopAutoPlay()
+    }
+  }
+
+  func applyScenario(_ scenario: DemoScenario) {
+    objectWillChange.send()
+    guard isEnabled else { return }
+    switch scenario {
+    case .twoMacStudio, .threeMacDesk:
+      activeDemoPeerID = "demo-macbook-pro"
+    case .securityShowcase:
+      activeDemoPeerID = "demo-macbook-pro"
+      BluetoothDiagnosticsService.shared.runFullDiagnosticSuite()
+      populateSampleLogs()
+    }
+  }
+
+  // MARK: - Hands-Free Auto-Play Demo Loop
+
+  func toggleAutoPlay() {
+    if isAutoPlaying {
+      stopAutoPlay()
+    } else {
+      startAutoPlay()
+    }
+  }
+
+  func startAutoPlay() {
+    if !AppSettings.shared.demoModeEnabled {
+      AppSettings.shared.demoModeEnabled = true
+    }
+    if !AppSettings.shared.demoSimulateSwitching {
+      AppSettings.shared.demoSimulateSwitching = true
+    }
+    isAutoPlaying = true
+    autoPlayCycleCount = 0
+    Log.info("Started hands-free Demo Auto-Play loop", "Demo")
+    rescheduleAutoPlayIfNeeded()
+    // Perform first simulated switch immediately so user gets instant visual feedback
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+      guard let self, self.isAutoPlaying else { return }
+      self.performAutoPlayStep()
+    }
+  }
+
+  func stopAutoPlay() {
+    autoPlayTimer?.invalidate()
+    autoPlayTimer = nil
+    if isAutoPlaying {
+      isAutoPlaying = false
+      Log.info("Stopped Demo Auto-Play loop", "Demo")
+    }
+  }
+
+  func rescheduleAutoPlayIfNeeded() {
+    guard isAutoPlaying else { return }
+    autoPlayTimer?.invalidate()
+    let interval = max(3.0, AppSettings.shared.demoAutoPlayInterval)
+    autoPlayTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) {
+      [weak self] _ in
+      self?.performAutoPlayStep()
+    }
+  }
+
+  private func performAutoPlayStep() {
+    guard isEnabled, isAutoPlaying else {
+      stopAutoPlay()
+      return
+    }
+    guard !SwitchCoordinator.shared.phase.isWorking else { return }
+    autoPlayCycleCount += 1
+
+    // In 3-Mac scenario, rotate target peer when bringing back to local Mac
+    if demoPeripheralsConnectedHere == false {
+      let peers = samplePeers
+      if peers.count > 1, let idx = peers.firstIndex(where: { $0.id == activeDemoPeerID }) {
+        activeDemoPeerID = peers[(idx + 1) % peers.count].id
+      }
+    }
+    SwitchCoordinator.shared.switchDevices()
+  }
+
+  // MARK: - Showcase Helpers
+
+  func populateSampleLogs() {
+    let local = localMacDisplayName
+    let peer = effectiveDemoPeerAlias
+    Log.info("Bonjour service published as \(local) (_blueswitch._tcp · port 54820)", "Network")
+    Log.info("Discovered peer \(peer) at 10.0.1.24:54820 — AES-256-GCM authenticated", "Network")
+    Log.info("Bluetooth Link Security verified: 3/3 HID peripherals using Bonded AES/E0 encryption", "Bluetooth")
+    Log.info("Input Guard scanned active WindowServer taps: 0 unauthorized keystroke/mouse monitors", "Security")
+    Log.info("Switched Magic Keyboard with Touch ID, Magic Trackpad & Magic Mouse to \(peer) in 340 ms", "Switch")
+  }
+
+  func resetDemoState() {
+    stopAutoPlay()
+    demoPeripheralsConnectedHere = true
+    activeDemoPeerID = "demo-macbook-pro"
+    SecurityMonitor.shared.clearIncidents()
+    Log.info("Reset Demo Mode showcase state (peripherals connected to \(localMacDisplayName))", "Demo")
   }
 
   // MARK: - Display Redaction Helpers
 
+  private var effectiveDemoLocalAlias: String {
+    let trimmed = AppSettings.shared.demoLocalMacName.trimmingCharacters(in: .whitespacesAndNewlines)
+    return trimmed.isEmpty ? "Mac Studio" : trimmed
+  }
+
+  private var effectiveDemoPeerAlias: String {
+    let trimmed = AppSettings.shared.demoPeerMacName.trimmingCharacters(in: .whitespacesAndNewlines)
+    return trimmed.isEmpty ? "MacBook Pro 16\"" : trimmed
+  }
+
   var localMacDisplayName: String {
     guard isEnabled else { return AppSettings.shared.effectiveDeviceName }
-    return "Mac Studio"
+    return effectiveDemoLocalAlias
   }
 
   var publishedServiceDisplayName: String {
     guard isEnabled else { return NetworkService.shared.publishedName ?? "—" }
-    return "Mac Studio (_blueswitch._tcp)"
+    return "\(effectiveDemoLocalAlias) (_blueswitch._tcp)"
   }
 
   var listeningPortDisplay: String {
@@ -75,6 +232,9 @@ final class DemoMode: ObservableObject {
   func peerDisplayName(_ peer: PeerDevice) -> String {
     guard isEnabled else { return peer.name }
     if samplePeers.contains(where: { $0.id == peer.id }) { return peer.name }
+    if NetworkService.shared.activePeer?.id == peer.id {
+      return effectiveDemoPeerAlias
+    }
     let idx = abs(peer.id.hashValue) % Self.genericMacNames.count
     return Self.genericMacNames[idx]
   }
@@ -127,15 +287,16 @@ final class DemoMode: ObservableObject {
   func sanitizeLog(_ text: String) -> String {
     guard isEnabled else { return text }
     var out = sanitizePath(text)
+    let localAlias = effectiveDemoLocalAlias
 
     // Scrub full name & username
     for token in [NSFullUserName(), NSUserName(), Host.current().localizedName ?? ""]
     where !token.isEmpty {
-      out = out.replacingOccurrences(of: token, with: "Mac Studio", options: .caseInsensitive)
+      out = out.replacingOccurrences(of: token, with: localAlias, options: .caseInsensitive)
     }
     let customDev = AppSettings.shared.deviceName.trimmingCharacters(in: .whitespacesAndNewlines)
     if !customDev.isEmpty {
-      out = out.replacingOccurrences(of: customDev, with: "Mac Studio", options: .caseInsensitive)
+      out = out.replacingOccurrences(of: customDev, with: localAlias, options: .caseInsensitive)
     }
 
     // Scrub registered & discovered peer names and hosts
@@ -246,4 +407,3 @@ final class DemoMode: ObservableObject {
     return name
   }
 }
-
