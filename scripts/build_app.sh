@@ -38,6 +38,8 @@ echo "✓ Built $APP (v$VERSION) and $ZIP"
 if [[ "${1:-}" == "--install" ]]; then
   echo "▸ Installing to /Applications…"
   pkill -x BlueSwitch 2>/dev/null || true
+  sleep 0.3
+  pkill -9 -x BlueSwitch 2>/dev/null || true
   rm -rf /Applications/BlueSwitch.app
   cp -R "$APP" /Applications/
   touch /Applications/BlueSwitch.app
