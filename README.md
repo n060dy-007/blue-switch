@@ -47,13 +47,15 @@ Mac. If they aren't, they're pulled here.
 
 | Pane | Settings |
 | --- | --- |
-| **General** | Launch at login · Take peripherals on launch · Menu bar icon · Left-click action · Ask before switching · Theme · Dock icon · Auto-update other Macs over LAN · Allow incoming peer updates · Auto-check GitHub updates · Install from file / Push update to all Macs |
-| **Switching** | Release method (unpair / close) · Partial-state behavior · Auto-click Bluetooth connection requests · Auto-click scope & scan interval · Disconnect poll interval · Max disconnect checks · Settle delay · Pairing timeout · Connection retries · Retry delay · RSSI range check · Auto-sync peripheral list · Send on sleep · Take on wake |
-| **Peripherals** | Add / remove / remove all · Rename (alias) · Include in switching · Connect / Release per device · Reorder · Refresh |
-| **Macs** | Register discovered Macs · Set target · Peer version badge · Push OTA update / SSH bootstrap · Health check · Notify · Sync peripherals · Remove · Add manually (host/port) |
-| **Network** | Device name · Listening port · Bonjour discovery on/off · Service type · Health-check timeout · Command timeout · Pairing key · Live status |
-| **Notifications** | Enable · Sound · On switch · On error · On remote request · On Mac discovered · Custom "Notify" title & message · Local send confirmation · Test / request permission |
-| **Shortcuts** | Enable global shortcuts · Switch · Send to peer · Take from peer |
+| **General** | Launch at login · Take peripherals on launch · Menu bar icon · Left-click action · Ask before switching · Theme · Dock icon · Auto-update other Macs over LAN · Allow incoming peer updates · Auto-check & auto-install GitHub updates · Install from file / Push update to all Macs |
+| **Switching** | Release method (unpair / close) · Partial-state behavior · Auto-click Bluetooth connection requests · Auto-click scope & scan interval · Independent Microphone & Speaker mute controls and switch-time auto-mute rules · Disconnect poll interval · Max disconnect checks · Settle delay · Pairing timeout · Connection retries · Retry delay · RSSI range check · Auto-sync peripheral list · Send on sleep · Take on wake |
+| **Peripherals** | Add / remove / remove all · Rename (alias) · Include in switching · Connect / Release / Test per device · Bluetooth Auto-Heal Watchdog · 4-stage Bluetooth diagnostic suite · Link encryption & RSSI telemetry · Anti-keystroke-injection (`BlueDucky`) guard · Reorder · Refresh |
+| **Macs** | Register discovered Macs · Set target · Peer version badge · Push encrypted LAN OTA update / SSH bootstrap · Health check · Notify · Sync peripherals · Remove · Add manually (host/port) |
+| **Network** | Device name · Listening port · Bonjour discovery on/off · Service type · AES-256-GCM + HKDF-SHA256 peer transport encryption · Anti-replay verification · Keystroke & mouse surveillance guard (`CGGetEventTapList`) with auto-remediation · Live status |
+| **Notifications** | Enable · Sound · On security alert · On switch · On error · On remote request · On Mac discovered · Custom "Notify" title & message · Local send confirmation · Test / request permission |
+| **Shortcuts** | Enable global shortcuts · Switch · Send to peer · Take from peer · Toggle Microphone Mute · Toggle Speakers Mute · Toggle Demo Mode |
+| **Demo Mode** | Zero-leak privacy redaction for screen recordings · Scenario presets · Custom Mac aliases · Hands-free Auto-Play demo loop · Isolated synthetic logs & incidents |
+| **Security Logs** | Encrypted connection security audit vault (`AES-256-GCM + AAD`) · Tamper-evident `HMAC-SHA256` hash chain · macOS Keychain master key (`ThisDeviceOnly`) · `0700`/`0600` `O_NOFOLLOW` hardened storage · One-click chain verification, segment rotation, and redacted/full export |
 | **Advanced** | Log level · Log history size · Status refresh interval · Export / Import settings · Restart network · Refresh Bluetooth · Reset to defaults |
 | **Activity Log** | Filter by level · Search · Copy · Save · Clear |
 
@@ -74,9 +76,10 @@ Mac. If they aren't, they're pulled here.
 ```
 Sources/BlueSwitch/
   App/   BlueSwitchApp.swift (entry, AppDelegate) · StatusBarController.swift
-  Core/  Settings · BluetoothService · NetworkService · PeerProtocol · SwitchCoordinator
+  Core/  Settings · BluetoothService · BluetoothDiagnostics · NetworkService · PeerProtocol
+         SwitchCoordinator · AudioService · SecurityMonitor · SecureAuditLog · DemoMode
          HotKeyManager · NotificationService · LoginItem · UpdateChecker · SettingsTransfer · Log
   UI/    DashboardView · SettingsRootView · SettingsPanes · DevicePanes · SupportPanes · Components
 Resources/  Info.plist · BlueSwitch.entitlements · AppIcon.icns
-scripts/    build_app.sh · make_icon.swift
+scripts/    build_app.sh · make_dmg.sh · make_pkg.sh · publish_release.sh · install_from_github.sh · update_peers.sh
 ```
