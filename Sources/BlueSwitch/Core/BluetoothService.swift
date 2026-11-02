@@ -44,6 +44,8 @@ final class BluetoothService: NSObject, ObservableObject {
   let peripheralsChanged = PassthroughSubject<[BluetoothPeripheral], Never>()
 
   private let queue = DispatchQueue(label: "com.blueswitch.bluetooth", qos: .userInitiated)
+  private let bleLock = NSLock()
+  private var connectedBLECanonicalNames: Set<String> = []
   private var activePairs: [String: IOBluetoothDevicePair] = [:]
   private var pairSessions: [String: PairSession] = [:]
   private var refreshTimer: Timer?
@@ -125,13 +127,32 @@ final class BluetoothService: NSObject, ObservableObject {
   }
 
   func isConnected(_ p: BluetoothPeripheral) -> Bool {
-    IOBluetoothDevice(addressString: p.id)?.isConnected() ?? false
+    BluetoothDiagnosticsService.shared.localConnectionAndBattery(id: p.id, name: p.name).isConnected
+  }
+
+  func isBLEConnected(canonicalName: String) -> Bool {
+    guard !canonicalName.isEmpty else { return false }
+    bleLock.lock()
+    defer { bleLock.unlock() }
+    return connectedBLECanonicalNames.contains(canonicalName)
+  }
+
+  func localPeripheralStatuses() -> [PeerPeripheralStatus] {
+    BluetoothDiagnosticsService.shared.allLocalHardwareSnapshots(managed: peripherals)
+  }
+
+  func bumpRefreshTick() {
+    if Thread.isMainThread {
+      refreshTick &+= 1
+    } else {
+      DispatchQueue.main.async { self.refreshTick &+= 1 }
+    }
   }
 
   var enabledPeripherals: [BluetoothPeripheral] { peripherals.filter(\.isEnabled) }
 
   var connectionState: PeripheralConnectionState {
-    let list = enabledPeripherals
+    let list = enabledPeripherals.isEmpty ? peripherals : enabledPeripherals
     guard !list.isEmpty else { return .none }
     let connected = list.filter { isConnected($0) }.count
     if connected == list.count { return .allConnected }
@@ -141,6 +162,21 @@ final class BluetoothService: NSObject, ObservableObject {
 
   private func refreshStatusOnly() {
     isPoweredOn = IOBluetoothHostController.default()?.powerState == kBluetoothHCIPowerStateON
+    if let cm = centralManager, cm.state == .poweredOn {
+      let bleHID = cm.retrieveConnectedPeripherals(withServices: [
+        CBUUID(string: "1812"), CBUUID(string: "180F"),
+      ])
+      let names = Set(
+        bleHID.compactMap { $0.name.map(BluetoothPeripheral.canonicalName) }.filter { !$0.isEmpty }
+      )
+      bleLock.lock()
+      connectedBLECanonicalNames = names
+      bleLock.unlock()
+    } else {
+      bleLock.lock()
+      connectedBLECanonicalNames.removeAll()
+      bleLock.unlock()
+    }
     refreshTick &+= 1
   }
 
@@ -161,8 +197,41 @@ final class BluetoothService: NSObject, ObservableObject {
         return BluetoothPeripheral(id: addr, name: dev.name ?? "Unknown Device")
       }
       DispatchQueue.main.async {
-        let managed = Set(self.peripherals.map(\.id))
-        self.availablePeripherals = list.filter { !managed.contains($0.id) }
+        // Reconcile any managed BLE peripheral whose MAC rotated after macOS re-pairing
+        var updatedManaged = self.peripherals
+        var didReconcileMAC = false
+        for i in updatedManaged.indices {
+          let existing = updatedManaged[i]
+          let oldDev = IOBluetoothDevice(addressString: existing.id)
+          if oldDev?.isPaired() == true || oldDev?.isConnected() == true { continue }
+          let canonName = BluetoothPeripheral.canonicalName(existing.name)
+          guard !canonName.isEmpty, canonName != "unknown device", canonName != "bluetooth device"
+          else { continue }
+          if let liveMatch = list.first(where: {
+            BluetoothPeripheral.canonicalName($0.name) == canonName
+              && $0.canonicalID != existing.canonicalID
+          }) {
+            updatedManaged[i] = BluetoothPeripheral(
+              id: liveMatch.id,
+              name: liveMatch.name,
+              alias: existing.alias,
+              isEnabled: existing.isEnabled
+            )
+            didReconcileMAC = true
+          }
+        }
+        if didReconcileMAC {
+          self.peripherals = updatedManaged
+        }
+
+        let managedMACs = Set(self.peripherals.map(\.canonicalID))
+        let managedNames = Set(
+          self.peripherals.map { BluetoothPeripheral.canonicalName($0.name) }.filter { !$0.isEmpty }
+        )
+        self.availablePeripherals = list.filter {
+          !managedMACs.contains($0.canonicalID)
+            && !managedNames.contains(BluetoothPeripheral.canonicalName($0.name))
+        }
         BluetoothDiagnosticsService.shared.refreshTelemetry()
       }
     }
@@ -171,9 +240,9 @@ final class BluetoothService: NSObject, ObservableObject {
   // MARK: - List Management
 
   func add(_ p: BluetoothPeripheral) {
-    guard !peripherals.contains(where: { $0.id == p.id }) else { return }
+    guard !peripherals.contains(where: { $0.canonicalID == p.canonicalID }) else { return }
     peripherals.append(p)
-    availablePeripherals.removeAll { $0.id == p.id }
+    availablePeripherals.removeAll { $0.canonicalID == p.canonicalID }
     Log.info("Added peripheral \(p.displayName)", "Bluetooth")
   }
 
@@ -199,10 +268,13 @@ final class BluetoothService: NSObject, ObservableObject {
 
   /// Replaces the list with one received from a peer (keeps local alias/enabled when present).
   func replace(with incoming: [BluetoothPeripheral]) {
-    let local = Dictionary(uniqueKeysWithValues: peripherals.map { ($0.id, $0) })
+    let local = Dictionary(
+      peripherals.map { ($0.canonicalID, $0) },
+      uniquingKeysWith: { first, _ in first }
+    )
     peripherals = incoming.map { p in
       var merged = p
-      if let l = local[p.id] {
+      if let l = local[p.canonicalID] {
         if merged.alias.isEmpty { merged.alias = l.alias }
       }
       return merged
@@ -213,10 +285,11 @@ final class BluetoothService: NSObject, ObservableObject {
   /// Adopts any peripherals sent in a peer's switch request that aren't registered locally yet.
   func adoptPeripheralsIfMissing(_ incoming: [BluetoothPeripheral]?) {
     guard let incoming, !incoming.isEmpty else { return }
-    let existing = Set(peripherals.map { $0.id.lowercased() })
+    var existing = Set(peripherals.map(\.canonicalID))
     var added = 0
-    for p in incoming where !existing.contains(p.id.lowercased()) {
+    for p in incoming where !existing.contains(p.canonicalID) {
       peripherals.append(p)
+      existing.insert(p.canonicalID)
       added += 1
     }
     if added > 0 {
@@ -405,7 +478,11 @@ final class BluetoothService: NSObject, ObservableObject {
   private func performConnectPass(
     for p: BluetoothPeripheral, pass: Int, totalPasses: Int, pairTimeout: TimeInterval
   ) -> Bool {
-    guard var device = IOBluetoothDevice(addressString: p.id) else {
+    if isConnected(p) { return true }
+    guard
+      var device = BluetoothDiagnosticsService.shared.resolveIOBluetoothDevice(
+        id: p.id, name: p.name)
+    else {
       Log.error("\(p.displayName) (\(p.id)) not found", "Bluetooth")
       return false
     }
@@ -423,16 +500,18 @@ final class BluetoothService: NSObject, ObservableObject {
     if device.isPaired() {
       Log.debug("\(p.displayName) is marked paired locally; trying direct openConnection", "Bluetooth")
       let openRes = device.openConnection()
-      if openRes == kIOReturnSuccess && device.isConnected() {
+      if openRes == kIOReturnSuccess && (device.isConnected() || isConnected(p)) {
         Thread.sleep(forTimeInterval: 0.2)
-        if device.isConnected() { return true }
+        if device.isConnected() || isConnected(p) { return true }
       }
       Log.info(
         "Direct connect to paired \(p.displayName) failed (\(openRes)); clearing stale pairing to re-pair",
         "Bluetooth")
       unpairOnMain(device, name: p.displayName)
       Thread.sleep(forTimeInterval: 0.45)
-      if let refreshed = IOBluetoothDevice(addressString: p.id) {
+      if let refreshed = BluetoothDiagnosticsService.shared.resolveIOBluetoothDevice(
+        id: p.id, name: p.name)
+      {
         device = refreshed
       }
     }
@@ -474,7 +553,9 @@ final class BluetoothService: NSObject, ObservableObject {
         }
       }
 
-      if let live = IOBluetoothDevice(addressString: p.id) {
+      if let live = BluetoothDiagnosticsService.shared.resolveIOBluetoothDevice(
+        id: p.id, name: p.name)
+      {
         device = live
       }
 
@@ -485,7 +566,7 @@ final class BluetoothService: NSObject, ObservableObject {
         deadline = max(deadline, Date().addingTimeInterval(3.5))
       }
 
-      if device.isConnected() && device.isPaired() {
+      if (device.isConnected() && device.isPaired()) || isConnected(p) {
         break
       }
 
@@ -495,19 +576,23 @@ final class BluetoothService: NSObject, ObservableObject {
     }
 
     // 4. If pairing finished or the device is now paired, ensure the baseband/HID connection is open.
-    if let live = IOBluetoothDevice(addressString: p.id) {
+    if let live = BluetoothDiagnosticsService.shared.resolveIOBluetoothDevice(
+      id: p.id, name: p.name)
+    {
       device = live
     }
-    if !device.isConnected() && (device.isPaired() || session.error == kIOReturnSuccess) {
+    if !device.isConnected() && !isConnected(p)
+      && (device.isPaired() || session.error == kIOReturnSuccess)
+    {
       let r = device.openConnection()
       Log.debug("Post-pair openConnection for \(p.displayName) returned \(r)", "Bluetooth")
       for _ in 0..<5 {
-        if device.isConnected() { break }
+        if device.isConnected() || isConnected(p) { break }
         Thread.sleep(forTimeInterval: 0.2)
       }
     }
 
-    let connected = device.isConnected()
+    let connected = device.isConnected() || isConnected(p)
 
     // 5. Clean up the pairing object. IMPORTANT: IOBluetoothDevicePair.stop() disconnects
     //    the device if called while connected, so only call stop() when not connected!
@@ -559,7 +644,10 @@ final class BluetoothService: NSObject, ObservableObject {
     DispatchQueue.main.async {
       self.cleanupPairOnMain(for: p.id, stopIfRunning: true)
     }
-    guard let device = IOBluetoothDevice(addressString: p.id) else {
+    guard
+      let device = BluetoothDiagnosticsService.shared.resolveIOBluetoothDevice(
+        id: p.id, name: p.name)
+    else {
       Log.error("\(p.displayName) not found", "Bluetooth")
       return
     }
@@ -634,7 +722,9 @@ final class BluetoothService: NSObject, ObservableObject {
         // If a device is still connected after the first check, nudge it with closeConnection + remove.
         if attempts == 2 {
           for p in stillConnected {
-            if let dev = IOBluetoothDevice(addressString: p.id) {
+            if let dev = BluetoothDiagnosticsService.shared.resolveIOBluetoothDevice(
+              id: p.id, name: p.name)
+            {
               dev.closeConnection()
               if settings.disconnectMethod == .unpair {
                 unpairOnMain(dev, name: p.displayName)

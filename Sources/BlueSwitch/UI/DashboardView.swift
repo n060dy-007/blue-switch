@@ -89,6 +89,9 @@ struct DashboardView: View {
     .onAppear {
       clicker.refreshPermission()
       audio.refresh()
+      bt.refresh()
+      btDiag.refreshTelemetry()
+      net.checkAllPeers()
     }
   }
 
@@ -261,9 +264,9 @@ struct DashboardView: View {
             ? "Demo Mode ON (Personal info hidden) — click to disable"
             : "Enable Demo Mode for public screen recording")
 
-        let state = demo.effectiveConnectionState
-        Text(state.label)
+        Text(demo.connectionSummaryLabel)
           .font(.caption.weight(.bold))
+          .lineLimit(1)
           .padding(.horizontal, 10).padding(.vertical, 5)
           .background(Capsule().fill(.white.opacity(0.22)))
           .foregroundStyle(.white)
@@ -433,6 +436,7 @@ struct DashboardView: View {
           .help("Run Bluetooth Diagnostic & Security Suite")
           Button {
             bt.refresh()
+            net.checkAllPeers()
           } label: {
             Image(systemName: "arrow.clockwise")
           }
@@ -495,21 +499,40 @@ private struct PeripheralMiniRow: View {
   let peripheral: BluetoothPeripheral
   let tick: Int
   @ObservedObject private var bt = BluetoothService.shared
+  @ObservedObject private var net = NetworkService.shared
   @ObservedObject private var demo = DemoMode.shared
   @ObservedObject private var diag = BluetoothDiagnosticsService.shared
 
   var body: some View {
     let connected = demo.isPeripheralConnected(peripheral)
+    let remotePeer = demo.remotePeerDisplayName(for: peripheral)
+    let activeAnywhere = connected || remotePeer != nil
     let busy = bt.busyIDs.contains(peripheral.id) || diag.testingPeripheralIDs.contains(peripheral.id)
     let t = diag.telemetry(for: peripheral)
+
+    let statusText: String = {
+      let suffix = peripheral.isEnabled ? "" : " · Paused"
+      if connected {
+        let base = (t.activeTransport == "USB-C") ? "Connected (USB-C)" : "Connected"
+        return base + suffix
+      }
+      if let peerName = remotePeer {
+        return "On \(peerName)" + suffix
+      }
+      return "Not connected" + suffix
+    }()
+
+    let statusColor: Color =
+      connected ? Theme.green : (remotePeer != nil ? Theme.cyan : .secondary)
+
     HStack(spacing: 10) {
       Image(systemName: peripheral.symbolName)
         .frame(width: 26, height: 26)
         .background(
           RoundedRectangle(cornerRadius: 7).fill(
-            connected ? Theme.blue.opacity(0.15) : Color.primary.opacity(0.06))
+            activeAnywhere ? Theme.blue.opacity(0.15) : Color.primary.opacity(0.06))
         )
-        .foregroundStyle(connected ? Theme.blue : .secondary)
+        .foregroundStyle(activeAnywhere ? Theme.blue : .secondary)
       VStack(alignment: .leading, spacing: 1) {
         HStack(spacing: 5) {
           Text(demo.peripheralDisplayName(peripheral)).font(.callout.weight(.medium)).lineLimit(1)
@@ -519,7 +542,8 @@ private struct PeripheralMiniRow: View {
             .help(t.encryptionBadgeText)
         }
         HStack(spacing: 5) {
-          Text(peripheral.isEnabled ? (connected ? "Connected" : "Standby") : "Excluded from switching")
+          Text(statusText)
+            .foregroundStyle(statusColor)
           if connected {
             Text("·")
             Text(t.encryptionBadgeText)
@@ -530,21 +554,33 @@ private struct PeripheralMiniRow: View {
                 .foregroundStyle(t.signalQuality.color)
             }
           }
-          if let avgMs = t.stats.averageLatencyMs {
-            Text("·")
-            Text("\(t.stats.reliabilityPercent)% (\(avgMs) ms)")
-          }
         }
         .font(.caption2).foregroundStyle(.secondary).lineLimit(1)
       }
       Spacer()
+      if let bat = t.batteryDisplay {
+        HStack(spacing: 3) {
+          Image(systemName: t.batterySymbol)
+            .font(.system(size: 11))
+          Text(bat)
+            .font(.caption2.monospacedDigit().weight(.semibold))
+        }
+        .foregroundStyle(t.batteryColor)
+        .help("Hardware battery level: \(bat)")
+      }
       if busy {
         ProgressView().controlSize(.small)
       } else {
-        Circle().fill(connected ? Theme.green : Color.secondary.opacity(0.4)).frame(width: 8)
+        Circle()
+          .fill(
+            connected
+              ? Theme.green
+              : (remotePeer != nil ? Theme.cyan : Color.secondary.opacity(0.4))
+          )
+          .frame(width: 8)
       }
     }
-    .opacity(peripheral.isEnabled ? 1 : 0.55)
+    .opacity(peripheral.isEnabled ? 1 : 0.82)
   }
 }
 

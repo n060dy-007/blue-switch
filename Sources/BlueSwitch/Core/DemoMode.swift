@@ -480,11 +480,35 @@ final class DemoMode: ObservableObject {
     return BluetoothService.shared.isConnected(p)
   }
 
+  /// Returns the display name of the peer Mac where `p` is actively connected, or `nil` if connected here / disconnected everywhere.
+  func remotePeerDisplayName(for p: BluetoothPeripheral) -> String? {
+    if isSimulatingSwitch || (isEnabled && BluetoothService.shared.peripherals.isEmpty) {
+      guard !demoPeripheralsConnectedHere else { return nil }
+      return effectiveActivePeer.map { peerDisplayName($0) } ?? effectiveDemoPeerAlias
+    }
+    if BluetoothService.shared.isConnected(p) { return nil }
+    guard let match = NetworkService.shared.remotePeripheralStatus(for: p),
+      match.status.isConnected
+    else { return nil }
+    return peerDisplayName(match.peer)
+  }
+
   var effectiveConnectionState: PeripheralConnectionState {
     if isSimulatingSwitch || (isEnabled && BluetoothService.shared.peripherals.isEmpty) {
       return demoPeripheralsConnectedHere ? .allConnected : .allDisconnected
     }
     return BluetoothService.shared.connectionState
+  }
+
+  var connectionSummaryLabel: String {
+    let state = effectiveConnectionState
+    if state == .allDisconnected {
+      let list = effectivePeripherals
+      if let peerName = list.compactMap({ remotePeerDisplayName(for: $0) }).first {
+        return "On \(peerName)"
+      }
+    }
+    return state.label
   }
 
   func reachability(for peer: PeerDevice) -> PeerReachability {

@@ -285,7 +285,11 @@ final class SwitchCoordinator: ObservableObject {
     bt.connectAll { [weak self] ok, total in
       guard let self else { return }
       if total == 0 {
-        self.fail("No peripherals registered. Add them in Settings → Peripherals.")
+        if self.bt.peripherals.isEmpty {
+          self.fail("No peripherals registered. Add them in Settings → Peripherals.")
+        } else {
+          self.fail("All peripherals are paused (toggled off) in Settings → Peripherals.")
+        }
       } else if ok == total {
         self.applyAudioOnConnect()
         self.succeed("Peripherals connected to this Mac")
@@ -322,17 +326,20 @@ final class SwitchCoordinator: ObservableObject {
     switch msg.kind {
     case .ping:
       var pong = PeerMessage.make(.pong)
-      pong.connectedCount = bt.enabledPeripherals.filter { bt.isConnected($0) }.count
+      let activePool = bt.enabledPeripherals.isEmpty ? bt.peripherals : bt.enabledPeripherals
+      pong.connectedCount = activePool.filter { bt.isConnected($0) }.count
+      pong.peerPeripheralStatuses = bt.localPeripheralStatuses()
       reply(pong)
 
     case .releaseAll:
       Log.info("\(msg.sender) requested release", "Switch")
       bt.adoptPeripheralsIfMissing(msg.peripherals)
       setPhase(.working("\(msg.sender) is taking peripherals…"))
-      let snapshot = bt.enabledPeripherals
+      let snapshot = bt.enabledPeripherals.isEmpty ? bt.peripherals : bt.enabledPeripherals
       bt.releaseAll { [weak self] ok in
         var resp = PeerMessage.make(ok ? .ok : .error)
         resp.peripherals = snapshot
+        resp.peerPeripheralStatuses = self?.bt.localPeripheralStatuses()
         reply(resp)
         if ok {
           self?.applyAudioOnRelease()

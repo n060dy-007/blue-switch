@@ -8,7 +8,7 @@ final class NetworkService: ObservableObject {
 
   private enum Constants {
     static let storageKey = "peers"
-    static let reachabilityInterval: TimeInterval = 15
+    static let reachabilityInterval: TimeInterval = 8
   }
 
   // MARK: Published state
@@ -18,6 +18,8 @@ final class NetworkService: ObservableObject {
   /// Peers discovered via Bonjour that are not registered.
   @Published private(set) var discovered: [PeerDevice] = []
   @Published private(set) var reachability: [String: PeerReachability] = [:]
+  /// Latest peripheral connection & battery statuses reported by each peer Mac (`peer.id -> statuses`).
+  @Published private(set) var peerPeripheralStatuses: [String: [PeerPeripheralStatus]] = [:]
   @Published private(set) var listenerStatus = "Stopped"
   @Published private(set) var listeningPort: UInt16?
   @Published private(set) var publishedName: String?
@@ -534,12 +536,48 @@ final class NetworkService: ObservableObject {
     for p in peers { ping(id: p.id) }
   }
 
+  /// Looks up whether `p` is reported connected (or has a battery reading) on any online peer Mac.
+  func remotePeripheralStatus(
+    for p: BluetoothPeripheral
+  ) -> (peer: PeerDevice, status: PeerPeripheralStatus)? {
+    let targetMAC = p.canonicalID
+    let targetName = BluetoothPeripheral.canonicalName(p.name)
+
+    // Prefer a peer where the peripheral is actively connected
+    for peer in peers where reachability[peer.id] == .online {
+      guard let list = peerPeripheralStatuses[peer.id] else { continue }
+      if let match = list.first(where: {
+        $0.isConnected
+          && ($0.canonicalID == targetMAC
+            || (!targetName.isEmpty && $0.canonicalName == targetName))
+      }) {
+        return (peer, match)
+      }
+    }
+    // Otherwise return any peer carrying a known battery reading for this peripheral
+    for peer in peers where reachability[peer.id] == .online {
+      guard let list = peerPeripheralStatuses[peer.id] else { continue }
+      if let match = list.first(where: {
+        $0.batteryPercent != nil
+          && ($0.canonicalID == targetMAC
+            || (!targetName.isEmpty && $0.canonicalName == targetName))
+      }) {
+        return (peer, match)
+      }
+    }
+    return nil
+  }
+
   private func recordResult(
     id: String, result: Result<PeerMessage, PeerError>, remote: NWEndpoint?
   ) {
     switch result {
     case .success(let msg):
       reachability[id] = .online
+      if let statuses = msg.peerPeripheralStatuses {
+        peerPeripheralStatuses[id] = statuses
+        BluetoothDiagnosticsService.shared.ingestRemoteBatterySnapshots(statuses)
+      }
       var hostString: String?
       var portInt: Int?
       if case .hostPort(let host, let port)? = remote {

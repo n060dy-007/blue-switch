@@ -19,6 +19,7 @@ struct PeerMessage: Codable {
   var title: String? = nil
   var body: String? = nil
   var peripherals: [BluetoothPeripheral]? = nil
+  var peerPeripheralStatuses: [PeerPeripheralStatus]? = nil
   var connectedCount: Int? = nil
   var appVersion: String? = nil
   var appBuild: String? = nil
@@ -355,10 +356,10 @@ final class PeerRequest {
 
 enum AppInfo {
   static var version: String {
-    Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0.9"
+    Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0.10"
   }
   static var build: String {
-    Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "10"
+    Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "11"
   }
 
   /// Compares two version strings (`"1.0.3"` vs `"1.0.2"`) and optional build numbers.

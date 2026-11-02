@@ -2,6 +2,7 @@ import Combine
 import CoreBluetooth
 import Foundation
 import IOBluetooth
+import IOKit
 import SwiftUI
 
 // MARK: - Telemetry & Security Models
@@ -113,6 +114,34 @@ struct PeripheralSecurityTelemetry: Identifiable {
   var deviceClassMinor: UInt32
   var vendorName: String
   var stats: PeripheralReliabilityStats
+  var batteryPercent: Int? = nil
+  var isCharging: Bool = false
+  var activeTransport: String? = nil
+  var connectedOnPeerName: String? = nil
+
+  var batterySymbol: String {
+    if isCharging { return "battery.100percent.bolt" }
+    guard let pct = batteryPercent else { return "battery.0percent" }
+    if pct >= 88 { return "battery.100percent" }
+    if pct >= 63 { return "battery.75percent" }
+    if pct >= 38 { return "battery.50percent" }
+    if pct >= 13 { return "battery.25percent" }
+    return "battery.0percent"
+  }
+
+  var batteryColor: Color {
+    if isCharging { return Theme.green }
+    guard let pct = batteryPercent else { return .secondary }
+    if pct <= 15 { return Theme.red }
+    if pct <= 30 { return Theme.amber }
+    if pct >= 50 { return Theme.green }
+    return .secondary
+  }
+
+  var batteryDisplay: String? {
+    guard let pct = batteryPercent else { return nil }
+    return isCharging ? "\(pct)% ⚡" : "\(pct)%"
+  }
 
   var signalQuality: BluetoothSignalQuality {
     guard isConnected, let rssi else { return .idle }
@@ -124,13 +153,24 @@ struct PeripheralSecurityTelemetry: Identifiable {
 
   var rssiDisplay: String {
     guard isConnected, let rssi else {
-      return isConnected ? "Active Link" : "Standby"
+      if isConnected {
+        if let tr = activeTransport, tr == "USB-C" {
+          return "Wired USB-C"
+        }
+        return "Active Link"
+      }
+      if let peer = connectedOnPeerName {
+        return "Active on \(peer)"
+      }
+      return "Standby"
     }
     return "\(rssi) dBm (\(signalQuality.rawValue))"
   }
 
   var isLinkEncrypted: Bool {
     if encryptionMode > 0 { return true }
+    if activeTransport == "USB-C" && isConnected { return true }
+    if connectedOnPeerName != nil { return true }
     // On macOS, paired Apple Magic HID devices connected over classic/BR-EDR or BLE HID
     // enforce link-layer encryption via their paired bond even when HCI encryptionMode reports 0.
     return isConnected && isPaired
@@ -138,13 +178,17 @@ struct PeripheralSecurityTelemetry: Identifiable {
 
   var encryptionBadgeText: String {
     if isConnected {
-      if encryptionMode >= 1 {
+      if activeTransport == "USB-C" {
+        return "Direct USB-C HID"
+      } else if encryptionMode >= 1 {
         return "AES/E0 Link Encrypted"
       } else if isPaired {
         return "Bonded HID Encrypted"
       } else {
         return "Unencrypted Link"
       }
+    } else if connectedOnPeerName != nil {
+      return "Bonded HID Encrypted"
     } else {
       return isPaired ? "Paired Bond Ready" : "Re-pairs on Switch"
     }
@@ -153,6 +197,7 @@ struct PeripheralSecurityTelemetry: Identifiable {
   var encryptionColor: Color {
     if isConnected && !isLinkEncrypted { return Theme.red }
     if isConnected && isLinkEncrypted { return Theme.green }
+    if connectedOnPeerName != nil { return Theme.cyan }
     return isPaired ? Theme.blue : .secondary
   }
 
@@ -170,12 +215,21 @@ struct PeripheralSecurityTelemetry: Identifiable {
     case 0x01:
       return "Computer"
     default:
+      let lower = name.lowercased()
+      if lower.contains("trackpad") || lower.contains("mouse") { return "HID Pointing / Trackpad" }
+      if lower.contains("keyboard") { return "HID Keyboard" }
       return "Bluetooth Device"
     }
   }
 
   var connectionDirectionLabel: String {
-    if !isConnected { return "Standby" }
+    if !isConnected {
+      if let peer = connectedOnPeerName {
+        return "Connected on \(peer)"
+      }
+      return "Standby"
+    }
+    if activeTransport == "USB-C" { return "Wired USB-C" }
     return isIncoming ? "Peripheral-Initiated (Reconnect)" : "Host-Initiated (Verified)"
   }
 }
@@ -218,6 +272,24 @@ struct BluetoothDiagnosticStepResult: Identifiable {
 final class BluetoothDiagnosticsService: ObservableObject {
   static let shared = BluetoothDiagnosticsService()
 
+  struct HIDHardwareNode {
+    var canonicalMAC: String?
+    var product: String
+    var canonicalName: String
+    var batteryPercent: Int?
+    var isCharging: Bool
+    var transport: String
+    var vendorID: Int?
+  }
+
+  struct AccessoryPowerReading {
+    var name: String
+    var canonicalName: String
+    var batteryPercent: Int
+    var isCharging: Bool
+    var isPresent: Bool
+  }
+
   @Published private(set) var controllerInfo = BluetoothControllerSecurityInfo()
   @Published private(set) var telemetryByID: [String: PeripheralSecurityTelemetry] = [:]
   @Published private(set) var statsByID: [String: PeripheralReliabilityStats] = [:]
@@ -235,15 +307,28 @@ final class BluetoothDiagnosticsService: ObservableObject {
   private var intentionallyReleasedToPeer = false
   private var watchdogTimer: Timer?
   private let statsStorageKey = "bluetoothReliabilityStatsV1"
+  private let batteryCacheKey = "bluetoothBatteryCacheV1"
+  private let scrubbedFlagKey = "bluetoothReliabilityScrubbedV2"
+
+  private let hidLock = NSLock()
+  private var cachedHIDNodesStorage: [HIDHardwareNode] = []
+  private var cachedHIDNodesAt: Date = .distantPast
+  private var accessoryPowerByName: [String: AccessoryPowerReading] = [:]
+  private var lastKnownBatteryByKey: [String: Int] = [:]
+  private var lastPmsetPollAt: Date = .distantPast
+  private var isPollingPmset = false
 
   private init() {
+    loadBatteryCache()
     loadStats()
+    pollAccessoryPowerAsync(force: true)
     refreshTelemetry()
   }
 
   // MARK: - Lifecycle & Watchdog
 
   func start() {
+    pollAccessoryPowerAsync(force: true)
     refreshTelemetry()
     scheduleWatchdog()
   }
@@ -278,7 +363,8 @@ final class BluetoothDiagnosticsService: ObservableObject {
     isAutoHeal: Bool = false
   ) {
     DispatchQueue.main.async {
-      var st = self.statsByID[p.id.uppercased()] ?? PeripheralReliabilityStats()
+      let key = p.canonicalID
+      var st = self.statsByID[key] ?? PeripheralReliabilityStats()
       if succeeded {
         st.successCount += 1
         st.consecutiveFailures = 0
@@ -292,12 +378,12 @@ final class BluetoothDiagnosticsService: ObservableObject {
           self.totalAutoHealsSession += 1
         }
         self.intentionallyReleasedToPeer = false
-      } else {
+      } else if !isAutoHeal {
         st.failureCount += 1
         st.consecutiveFailures += 1
         st.lastErrorDescription = "Timed out after \(attemptsUsed) attempt(s)"
       }
-      self.statsByID[p.id.uppercased()] = st
+      self.statsByID[key] = st
       self.saveStats()
       self.refreshTelemetry()
     }
@@ -322,14 +408,15 @@ final class BluetoothDiagnosticsService: ObservableObject {
     if DemoMode.shared.isEnabled {
       return demoTelemetry(for: p)
     }
-    let key = p.id.uppercased()
+    let key = p.canonicalID
     if let existing = telemetryByID[key] {
       return existing
     }
-    return inspectDevice(id: p.id, fallbackName: p.displayName)
+    return inspectDevice(id: p.id, fallbackName: p.name)
   }
 
   func refreshTelemetry() {
+    pollAccessoryPowerAsync(force: false)
     let host = IOBluetoothHostController.default()
     let powered = (host?.powerState == kBluetoothHCIPowerStateON)
     let rawAddr = (host?.addressAsString() ?? "Unavailable")
@@ -341,10 +428,16 @@ final class BluetoothDiagnosticsService: ObservableObject {
     var map: [String: PeripheralSecurityTelemetry] = [:]
 
     let managed = BluetoothService.shared.peripherals
-    var allIDs = Set(managed.map { $0.id.uppercased() })
+    var entriesToInspect: [String: String] = [:]
+    for p in managed {
+      entriesToInspect[p.canonicalID] = p.name
+    }
     for dev in pairedDevices {
-      if let addr = dev.addressString?.uppercased() {
-        allIDs.insert(addr)
+      if let addr = dev.addressString {
+        let canon = BluetoothPeripheral.canonicalMAC(addr)
+        if entriesToInspect[canon] == nil {
+          entriesToInspect[canon] = dev.name ?? "Bluetooth Device"
+        }
       }
     }
 
@@ -352,12 +445,9 @@ final class BluetoothDiagnosticsService: ObservableObject {
     var unencryptedActive = 0
     var unsolicitedHID = 0
 
-    for id in allIDs {
-      let fallback =
-        managed.first(where: { $0.id.caseInsensitiveCompare(id) == .orderedSame })?.displayName
-        ?? "Bluetooth Device"
-      let item = inspectDevice(id: id, fallbackName: fallback)
-      map[id] = item
+    for (canonID, fallback) in entriesToInspect {
+      let item = inspectDevice(id: canonID, fallbackName: fallback)
+      map[canonID] = item
 
       if item.isConnected && item.deviceClassMajor == 0x05 {
         connectedHID += 1
@@ -365,7 +455,9 @@ final class BluetoothDiagnosticsService: ObservableObject {
           unencryptedActive += 1
         }
         let isManaged = managed.contains {
-          $0.id.caseInsensitiveCompare(id) == .orderedSame
+          $0.canonicalID == canonID
+            || BluetoothPeripheral.canonicalName($0.name)
+              == BluetoothPeripheral.canonicalName(item.name)
         }
         if item.isIncoming && !item.isPaired && !isManaged {
           unsolicitedHID += 1
@@ -398,49 +490,61 @@ final class BluetoothDiagnosticsService: ObservableObject {
   }
 
   private func inspectDevice(id: String, fallbackName: String) -> PeripheralSecurityTelemetry {
-    let key = id.uppercased()
-    let stats = statsByID[key] ?? PeripheralReliabilityStats()
-    guard let dev = IOBluetoothDevice(addressString: id) else {
-      return PeripheralSecurityTelemetry(
-        id: key,
-        name: fallbackName,
-        isConnected: false,
-        isPaired: false,
-        rssi: nil,
-        rawRSSI: nil,
-        encryptionMode: 0,
-        isIncoming: false,
-        deviceClassMajor: 0x05,
-        deviceClassMinor: 0x10,
-        vendorName: Self.lookupVendor(forMAC: key),
-        stats: stats
-      )
-    }
+    let key = BluetoothPeripheral.canonicalMAC(id)
+    let stats = statsByID[key] ?? statsByID[id.uppercased()] ?? PeripheralReliabilityStats()
+    let local = localConnectionAndBattery(id: id, name: fallbackName)
+    let dev = resolveIOBluetoothDevice(id: id, name: fallbackName)
 
-    let connected = dev.isConnected()
-    let paired = dev.isPaired()
-    let rawR = Int(dev.rawRSSI())
-    let r = Int(dev.rssi())
+    let effectiveName =
+      (dev?.name?.isEmpty == false ? dev!.name! : nil)
+      ?? fallbackName
+    let probe = BluetoothPeripheral(id: id, name: effectiveName)
+    let remoteMatch = NetworkService.shared.remotePeripheralStatus(for: probe)
+    let remotePeerName: String? =
+      (!local.isConnected && remoteMatch?.status.isConnected == true)
+      ? remoteMatch?.peer.name
+      : nil
+
+    let effectiveBattery =
+      local.batteryPercent
+      ?? remoteMatch?.status.batteryPercent
+      ?? cachedBattery(canonicalMAC: key, canonicalName: BluetoothPeripheral.canonicalName(effectiveName))
+    let effectiveCharging =
+      local.isConnected
+      ? local.isCharging
+      : (remoteMatch?.status.isConnected == true ? (remoteMatch?.status.isCharging ?? false) : false)
+
+    let connected = local.isConnected
+    let paired = local.isPaired
+    let rawR = dev.map { Int($0.rawRSSI()) } ?? 0
+    let r = dev.map { Int($0.rssi()) } ?? 0
     let validRSSI: Int? = (connected && r != 127 && r != 0) ? r : nil
     let validRawRSSI: Int? = (connected && rawR != 127 && rawR != 0) ? rawR : nil
     let encMode = Self.queryEncryptionMode(dev)
-    let incoming = dev.isIncoming()
-    let major = dev.deviceClassMajor
-    let minor = dev.deviceClassMinor
+    let incoming = dev?.isIncoming() ?? false
+    let major = dev?.deviceClassMajor ?? 0x05
+    let lowerName = effectiveName.lowercased()
+    let defaultMinor: UInt32 =
+      (lowerName.contains("trackpad") || lowerName.contains("mouse")) ? 0x20 : 0x10
+    let minor = (dev != nil && dev!.deviceClassMajor != 0) ? dev!.deviceClassMinor : defaultMinor
 
     return PeripheralSecurityTelemetry(
       id: key,
-      name: dev.name ?? fallbackName,
+      name: effectiveName,
       isConnected: connected,
       isPaired: paired,
       rssi: validRSSI ?? validRawRSSI,
       rawRSSI: validRawRSSI,
       encryptionMode: encMode,
       isIncoming: incoming,
-      deviceClassMajor: major,
+      deviceClassMajor: major == 0 ? 0x05 : major,
       deviceClassMinor: minor,
-      vendorName: Self.lookupVendor(forMAC: key),
-      stats: stats
+      vendorName: Self.lookupVendor(forMAC: key, deviceName: effectiveName),
+      stats: stats,
+      batteryPercent: effectiveBattery,
+      isCharging: effectiveCharging,
+      activeTransport: local.transport,
+      connectedOnPeerName: remotePeerName
     )
   }
 
@@ -478,10 +582,15 @@ final class BluetoothDiagnosticsService: ObservableObject {
     let enabled = bt.enabledPeripherals
     guard !enabled.isEmpty else { return }
 
-    // Only auto-heal when at least one peripheral is connected here (meaning this Mac is active)
-    // OR when no peers are registered. This avoids fighting a peer Mac that currently owns the devices.
+    // Never attempt to auto-heal peripherals that are currently connected on a peer Mac.
     let connectedHere = enabled.filter { bt.isConnected($0) }
-    let dropped = enabled.filter { !bt.isConnected($0) && !bt.busyIDs.contains($0.id) }
+    let dropped = enabled.filter { p in
+      guard !bt.isConnected(p), !bt.busyIDs.contains(p.id) else { return false }
+      if NetworkService.shared.remotePeripheralStatus(for: p)?.status.isConnected == true {
+        return false
+      }
+      return true
+    }
     guard !dropped.isEmpty else { return }
     let shouldHeal = !connectedHere.isEmpty || NetworkService.shared.peers.isEmpty
     guard shouldHeal else { return }
@@ -704,6 +813,575 @@ final class BluetoothDiagnosticsService: ObservableObject {
     }
   }
 
+  // MARK: - Multi-Source Hardware Connection & Battery Engine
+
+  private static func isGenericDeviceName(_ canonName: String) -> Bool {
+    let generic: Set<String> = [
+      "", "bluetooth device", "unknown device", "wireless device",
+      "apple keyboard", "usb keyboard", "usb mouse", "headset", "btm",
+    ]
+    return generic.contains(canonName)
+  }
+
+  private static func isValidMAC(_ raw: String) -> Bool {
+    let parts = raw
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+      .replacingOccurrences(of: "-", with: ":")
+      .split(separator: ":")
+    guard parts.count == 6 else { return false }
+    return parts.allSatisfy { $0.count == 2 && UInt8($0, radix: 16) != nil }
+  }
+
+  /// Resolves an `IOBluetoothDevice` across colon/dash MAC formats and rotated BLE addresses.
+  func resolveIOBluetoothDevice(id: String, name: String) -> IOBluetoothDevice? {
+    let trimmed = id.trimmingCharacters(in: .whitespacesAndNewlines)
+    let canonMAC = BluetoothPeripheral.canonicalMAC(trimmed)
+    let dashMAC = canonMAC.replacingOccurrences(of: ":", with: "-").lowercased()
+    let canonName = BluetoothPeripheral.canonicalName(name)
+
+    var candidates: [IOBluetoothDevice] = []
+    if !trimmed.isEmpty, let d = IOBluetoothDevice(addressString: trimmed) {
+      candidates.append(d)
+    }
+    if canonMAC != trimmed, let d = IOBluetoothDevice(addressString: canonMAC) {
+      candidates.append(d)
+    }
+    if dashMAC != trimmed, let d = IOBluetoothDevice(addressString: dashMAC) {
+      candidates.append(d)
+    }
+
+    let paired = (IOBluetoothDevice.pairedDevices() as? [IOBluetoothDevice]) ?? []
+    for dev in paired {
+      if let addr = dev.addressString, BluetoothPeripheral.canonicalMAC(addr) == canonMAC {
+        candidates.append(dev)
+      }
+    }
+
+    if let connectedMatch = candidates.first(where: { $0.isConnected() }) {
+      return connectedMatch
+    }
+    if let pairedMatch = candidates.first(where: { $0.isPaired() }) {
+      return pairedMatch
+    }
+
+    // Fallback for Apple Magic BLE HID devices whose BLE address rotated after re-pairing
+    if !Self.isGenericDeviceName(canonName) {
+      let nameMatches = paired.filter {
+        guard let devName = $0.name else { return false }
+        return BluetoothPeripheral.canonicalName(devName) == canonName
+      }
+      if let connectedByName = nameMatches.first(where: { $0.isConnected() }) {
+        return connectedByName
+      }
+      if let firstByName = nameMatches.first {
+        return firstByName
+      }
+    }
+
+    return candidates.first
+  }
+
+  /// Queries live local connection state, battery percentage (`0-100`), charging status, and transport
+  /// across `IOBluetooth`, `IORegistry` external HID nodes, `pmset -g accps`, and `CoreBluetooth`.
+  func localConnectionAndBattery(
+    id: String, name: String
+  ) -> (
+    isConnected: Bool, isPaired: Bool, batteryPercent: Int?, isCharging: Bool,
+    transport: String?, resolvedMAC: String?
+  ) {
+    pollAccessoryPowerAsync(force: false)
+    let canonMAC = BluetoothPeripheral.canonicalMAC(id)
+    let dev = resolveIOBluetoothDevice(id: id, name: name)
+    let effectiveName = (dev?.name?.isEmpty == false ? dev!.name! : nil) ?? name
+    let canonName = BluetoothPeripheral.canonicalName(effectiveName)
+    let resolvedMAC = dev?.addressString.map(BluetoothPeripheral.canonicalMAC)
+
+    let ioConnected = dev?.isConnected() ?? false
+    let ioPaired = dev?.isPaired() ?? false
+
+    let nodes = cachedHIDNodes()
+    let matchedNodes = nodes.filter { node in
+      if let nodeMAC = node.canonicalMAC {
+        if nodeMAC == canonMAC || (resolvedMAC != nil && nodeMAC == resolvedMAC) {
+          return true
+        }
+      }
+      if !Self.isGenericDeviceName(canonName), !node.canonicalName.isEmpty,
+        node.canonicalName == canonName
+      {
+        return true
+      }
+      return false
+    }
+
+    let accps = accessoryPowerEntry(forCanonicalName: canonName)
+    let bleConnected =
+      !Self.isGenericDeviceName(canonName)
+      && BluetoothService.shared.isBLEConnected(canonicalName: canonName)
+
+    let isConnected =
+      ioConnected || !matchedNodes.isEmpty || (accps?.isPresent == true) || bleConnected
+    let isPaired = ioPaired || isConnected
+
+    let nodeBattery = matchedNodes.compactMap(\.batteryPercent).first
+    let accpsBattery = accps?.batteryPercent
+    let liveBattery = nodeBattery ?? accpsBattery
+
+    if let pct = liveBattery {
+      recordBatteryInCache(pct, canonicalMAC: canonMAC, canonicalName: canonName)
+      if let rMAC = resolvedMAC, rMAC != canonMAC {
+        recordBatteryInCache(pct, canonicalMAC: rMAC, canonicalName: canonName)
+      }
+    }
+
+    let battery = liveBattery ?? cachedBattery(canonicalMAC: canonMAC, canonicalName: canonName)
+    let charging =
+      matchedNodes.contains(where: \.isCharging) || (accps?.isCharging == true)
+    let transport: String? = {
+      if let nodeTransport = matchedNodes.first?.transport, !nodeTransport.isEmpty {
+        return nodeTransport
+      }
+      if bleConnected && !ioConnected { return "BLE" }
+      if isConnected { return "Bluetooth" }
+      return nil
+    }()
+
+    return (isConnected, isPaired, battery, charging, transport, resolvedMAC)
+  }
+
+  /// Builds live status & battery snapshots for ALL local managed, paired, and active HID peripherals
+  /// so peer Macs always see accurate connection & battery telemetry.
+  func allLocalHardwareSnapshots(managed: [BluetoothPeripheral]) -> [PeerPeripheralStatus] {
+    var byMAC: [String: PeerPeripheralStatus] = [:]
+    var coveredNames: Set<String> = []
+
+    for p in managed {
+      let info = localConnectionAndBattery(id: p.id, name: p.name)
+      let mac = info.resolvedMAC ?? p.canonicalID
+      let cName = BluetoothPeripheral.canonicalName(p.name)
+      if !cName.isEmpty { coveredNames.insert(cName) }
+      byMAC[mac] = PeerPeripheralStatus(
+        id: mac,
+        name: p.name,
+        isConnected: info.isConnected,
+        batteryPercent: info.batteryPercent,
+        isCharging: info.isCharging,
+        transport: info.transport
+      )
+    }
+
+    let paired = (IOBluetoothDevice.pairedDevices() as? [IOBluetoothDevice]) ?? []
+    for dev in paired {
+      guard let addr = dev.addressString else { continue }
+      let mac = BluetoothPeripheral.canonicalMAC(addr)
+      if byMAC[mac] != nil { continue }
+      let devName = dev.name ?? "Bluetooth Device"
+      let info = localConnectionAndBattery(id: mac, name: devName)
+      if info.isConnected || info.batteryPercent != nil {
+        let cName = BluetoothPeripheral.canonicalName(devName)
+        if !cName.isEmpty { coveredNames.insert(cName) }
+        byMAC[mac] = PeerPeripheralStatus(
+          id: mac,
+          name: devName,
+          isConnected: info.isConnected,
+          batteryPercent: info.batteryPercent,
+          isCharging: info.isCharging,
+          transport: info.transport
+        )
+      }
+    }
+
+    for node in cachedHIDNodes() {
+      let mac = node.canonicalMAC ?? "HID:\(node.canonicalName)"
+      if byMAC[mac] != nil { continue }
+      if !node.canonicalName.isEmpty && coveredNames.contains(node.canonicalName) { continue }
+      guard !node.product.isEmpty || node.canonicalMAC != nil else { continue }
+      byMAC[mac] = PeerPeripheralStatus(
+        id: mac,
+        name: node.product.isEmpty ? mac : node.product,
+        isConnected: true,
+        batteryPercent: node.batteryPercent,
+        isCharging: node.isCharging,
+        transport: node.transport
+      )
+    }
+
+    return Array(byMAC.values)
+  }
+
+  /// Stores battery readings received from a peer Mac so battery telemetry stays populated across switches.
+  func ingestRemoteBatterySnapshots(_ list: [PeerPeripheralStatus]) {
+    var updated = false
+    hidLock.lock()
+    for item in list {
+      guard let pct = item.batteryPercent, (0...100).contains(pct) else { continue }
+      let mKey = item.canonicalID
+      if !mKey.isEmpty, lastKnownBatteryByKey[mKey] != pct {
+        lastKnownBatteryByKey[mKey] = pct
+        updated = true
+      }
+      let nKey = "name:\(item.canonicalName)"
+      if !item.canonicalName.isEmpty, !Self.isGenericDeviceName(item.canonicalName),
+        lastKnownBatteryByKey[nKey] != pct
+      {
+        lastKnownBatteryByKey[nKey] = pct
+        updated = true
+      }
+    }
+    let snapshotToSave = updated ? lastKnownBatteryByKey : nil
+    hidLock.unlock()
+
+    if let snapshotToSave {
+      saveBatteryCache(snapshotToSave)
+    }
+    DispatchQueue.main.async {
+      self.refreshTelemetry()
+      BluetoothService.shared.bumpRefreshTick()
+    }
+  }
+
+  private func recordBatteryInCache(
+    _ pct: Int, canonicalMAC: String, canonicalName: String
+  ) {
+    guard (0...100).contains(pct) else { return }
+    var snapshotToSave: [String: Int]? = nil
+    hidLock.lock()
+    if !canonicalMAC.isEmpty, lastKnownBatteryByKey[canonicalMAC] != pct {
+      lastKnownBatteryByKey[canonicalMAC] = pct
+      snapshotToSave = lastKnownBatteryByKey
+    }
+    if !canonicalName.isEmpty, !Self.isGenericDeviceName(canonicalName) {
+      let nKey = "name:\(canonicalName)"
+      if lastKnownBatteryByKey[nKey] != pct {
+        lastKnownBatteryByKey[nKey] = pct
+        snapshotToSave = lastKnownBatteryByKey
+      }
+    }
+    hidLock.unlock()
+    if let snapshotToSave {
+      saveBatteryCache(snapshotToSave)
+    }
+  }
+
+  private func cachedBattery(canonicalMAC: String, canonicalName: String) -> Int? {
+    hidLock.lock()
+    defer { hidLock.unlock() }
+    if let v = lastKnownBatteryByKey[canonicalMAC] { return v }
+    if !canonicalName.isEmpty, !Self.isGenericDeviceName(canonicalName),
+      let v = lastKnownBatteryByKey["name:\(canonicalName)"]
+    {
+      return v
+    }
+    return nil
+  }
+
+  private func accessoryPowerEntry(forCanonicalName canonName: String) -> AccessoryPowerReading? {
+    guard !Self.isGenericDeviceName(canonName) else { return nil }
+    hidLock.lock()
+    defer { hidLock.unlock() }
+    return accessoryPowerByName[canonName]
+  }
+
+  private func cachedHIDNodes() -> [HIDHardwareNode] {
+    hidLock.lock()
+    if Date().timeIntervalSince(cachedHIDNodesAt) < 0.8 {
+      let cached = cachedHIDNodesStorage
+      hidLock.unlock()
+      return cached
+    }
+    hidLock.unlock()
+
+    let scanned = Self.scanIORegistryHIDNodes()
+    hidLock.lock()
+    cachedHIDNodesStorage = scanned
+    cachedHIDNodesAt = Date()
+    hidLock.unlock()
+    return scanned
+  }
+
+  private static func scanIORegistryHIDNodes() -> [HIDHardwareNode] {
+    var iterator: io_iterator_t = 0
+    guard
+      IOServiceGetMatchingServices(
+        kIOMainPortDefault, IOServiceMatching("IOService"), &iterator) == KERN_SUCCESS
+    else {
+      return []
+    }
+    defer { IOObjectRelease(iterator) }
+
+    let ignoredSubstrings = [
+      "fifo", "spu", "spmi", "audio", "internal", "backlight", "headset", "btm", "mikey",
+    ]
+    var results: [HIDHardwareNode] = []
+
+    while case let entry = IOIteratorNext(iterator), entry != 0 {
+      defer { IOObjectRelease(entry) }
+
+      let directBat = propInt(entry, "BatteryPercent") ?? propInt(entry, "BatteryLevel")
+      let directTransport = propString(entry, "Transport")
+      let hasExternalTransport: Bool = {
+        guard let t = directTransport?.lowercased() else { return false }
+        return t == "bluetooth" || t == "bluetoothlowenergy" || t == "ble" || t == "usb"
+      }()
+
+      guard directBat != nil || hasExternalTransport else { continue }
+      if propBool(entry, "Built-In") == true { continue }
+
+      let className = (IOObjectCopyClass(entry)?.takeRetainedValue() as String? ?? "").lowercased()
+      if ignoredSubstrings.contains(where: { className.contains($0) }) { continue }
+
+      var product = propString(entry, "Product") ?? ""
+      var transportRaw = directTransport ?? ""
+      var macCandidate = extractMAC(from: entry)
+      var vendorID = propInt(entry, "VendorID")
+      var isBuiltIn = false
+      var charging =
+        (propBool(entry, "BatteryCharging") == true)
+        || (propBool(entry, "IsCharging") == true)
+
+      // Walk up at most 6 parent IORegistry entries to fill in missing Product / MAC / Transport
+      var cur: io_registry_entry_t = 0
+      if IORegistryEntryGetParentEntry(entry, kIOServicePlane, &cur) == KERN_SUCCESS {
+        var depth = 0
+        while cur != 0 && depth < 6 {
+          depth += 1
+          if propBool(cur, "Built-In") == true {
+            isBuiltIn = true
+          }
+          if product.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+            let p = propString(cur, "Product"),
+            !p.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+          {
+            product = p
+          }
+          if transportRaw.isEmpty, let t = propString(cur, "Transport"), !t.isEmpty {
+            transportRaw = t
+          }
+          if macCandidate == nil {
+            macCandidate = extractMAC(from: cur)
+          }
+          if vendorID == nil {
+            vendorID = propInt(cur, "VendorID")
+          }
+          if !charging {
+            charging =
+              (propBool(cur, "BatteryCharging") == true)
+              || (propBool(cur, "IsCharging") == true)
+          }
+          var next: io_registry_entry_t = 0
+          let hasNext =
+            !isBuiltIn && (depth < 6)
+            && (IORegistryEntryGetParentEntry(cur, kIOServicePlane, &next) == KERN_SUCCESS)
+          IOObjectRelease(cur)
+          cur = hasNext ? next : 0
+        }
+      }
+
+      if isBuiltIn { continue }
+      let lowerProd = product.lowercased()
+      let lowerTrans = transportRaw.lowercased()
+      if ignoredSubstrings.contains(where: { lowerProd.contains($0) || lowerTrans.contains($0) }) {
+        continue
+      }
+
+      // Exclude pure wired non-rechargeable USB keyboards/mice that have neither battery nor BT MAC
+      if lowerTrans == "usb" && directBat == nil && macCandidate == nil {
+        continue
+      }
+
+      let normalizedTransport: String = {
+        if lowerTrans == "usb" { return "USB-C" }
+        if lowerTrans.contains("lowenergy") || lowerTrans == "ble" { return "BLE" }
+        return "Bluetooth"
+      }()
+
+      let clampedBattery: Int? = directBat.flatMap { (0...100).contains($0) ? $0 : nil }
+      if normalizedTransport == "USB-C" && clampedBattery != nil && (clampedBattery ?? 100) < 100 {
+        charging = true
+      }
+
+      results.append(
+        HIDHardwareNode(
+          canonicalMAC: macCandidate,
+          product: product.trimmingCharacters(in: .whitespacesAndNewlines),
+          canonicalName: BluetoothPeripheral.canonicalName(product),
+          batteryPercent: clampedBattery,
+          isCharging: charging,
+          transport: normalizedTransport,
+          vendorID: vendorID
+        )
+      )
+    }
+
+    return results
+  }
+
+  private static func extractMAC(from entry: io_registry_entry_t) -> String? {
+    for key in ["DeviceAddress", "SerialNumber", "BD_ADDR"] {
+      if let s = propString(entry, key), isValidMAC(s) {
+        return BluetoothPeripheral.canonicalMAC(s)
+      }
+    }
+    if let data = IORegistryEntryCreateCFProperty(
+      entry, "BD_ADDR" as CFString, kCFAllocatorDefault, 0)?.takeRetainedValue() as? Data,
+      data.count == 6
+    {
+      let bytes = [UInt8](data)
+      if bytes.contains(where: { $0 != 0 }) {
+        return bytes.map { String(format: "%02X", $0) }.joined(separator: ":")
+      }
+    }
+    return nil
+  }
+
+  private static func propString(_ entry: io_registry_entry_t, _ key: String) -> String? {
+    guard
+      let val = IORegistryEntryCreateCFProperty(
+        entry, key as CFString, kCFAllocatorDefault, 0)?.takeRetainedValue()
+    else { return nil }
+    if let s = val as? String { return s }
+    if let data = val as? Data, !data.isEmpty {
+      let trimmed = data.prefix { $0 != 0 }
+      return String(data: Data(trimmed), encoding: .utf8)
+        ?? String(data: Data(trimmed), encoding: .macOSRoman)
+    }
+    return nil
+  }
+
+  private static func propInt(_ entry: io_registry_entry_t, _ key: String) -> Int? {
+    guard
+      let num = IORegistryEntryCreateCFProperty(
+        entry, key as CFString, kCFAllocatorDefault, 0)?.takeRetainedValue() as? NSNumber
+    else { return nil }
+    return num.intValue
+  }
+
+  private static func propBool(_ entry: io_registry_entry_t, _ key: String) -> Bool? {
+    guard
+      let num = IORegistryEntryCreateCFProperty(
+        entry, key as CFString, kCFAllocatorDefault, 0)?.takeRetainedValue() as? NSNumber
+    else { return nil }
+    return num.boolValue
+  }
+
+  /// Polls `/usr/bin/pmset -g accps` asynchronously (decoding UTF-8 or MacRoman `0xD5` apostrophes).
+  func pollAccessoryPowerAsync(force: Bool) {
+    hidLock.lock()
+    let elapsed = Date().timeIntervalSince(lastPmsetPollAt)
+    if isPollingPmset || (!force && elapsed < 4.5) {
+      hidLock.unlock()
+      return
+    }
+    isPollingPmset = true
+    lastPmsetPollAt = Date()
+    hidLock.unlock()
+
+    DispatchQueue.global(qos: .utility).async { [weak self] in
+      guard let self else { return }
+      var parsed: [String: AccessoryPowerReading] = [:]
+      let proc = Process()
+      proc.executableURL = URL(fileURLWithPath: "/usr/bin/pmset")
+      proc.arguments = ["-g", "accps"]
+      let pipe = Pipe()
+      proc.standardOutput = pipe
+      proc.standardError = FileHandle.nullDevice
+
+      do {
+        try proc.run()
+        let rawData = pipe.fileHandleForReading.readDataToEndOfFile()
+        proc.waitUntilExit()
+        let text =
+          String(data: rawData, encoding: .utf8)
+          ?? String(data: rawData, encoding: .macOSRoman)
+          ?? String(decoding: rawData, as: UTF8.self)
+        parsed = Self.parsePmsetAccps(text)
+      } catch {
+        // Ignore pmset failures gracefully; IORegistry covers primary battery readings.
+      }
+
+      var changed = false
+      var cacheToSave: [String: Int]? = nil
+      self.hidLock.lock()
+      self.isPollingPmset = false
+      if self.accessoryPowerByName.count != parsed.count {
+        changed = true
+      } else {
+        for (k, v) in parsed {
+          if let old = self.accessoryPowerByName[k],
+            old.batteryPercent == v.batteryPercent,
+            old.isCharging == v.isCharging,
+            old.isPresent == v.isPresent
+          {
+            continue
+          }
+          changed = true
+          break
+        }
+      }
+      self.accessoryPowerByName = parsed
+      for (_, v) in parsed where (0...100).contains(v.batteryPercent) {
+        let nKey = "name:\(v.canonicalName)"
+        if !Self.isGenericDeviceName(v.canonicalName), self.lastKnownBatteryByKey[nKey] != v.batteryPercent {
+          self.lastKnownBatteryByKey[nKey] = v.batteryPercent
+          cacheToSave = self.lastKnownBatteryByKey
+        }
+      }
+      self.hidLock.unlock()
+
+      if let cacheToSave {
+        self.saveBatteryCache(cacheToSave)
+      }
+      if changed {
+        DispatchQueue.main.async {
+          BluetoothService.shared.bumpRefreshTick()
+        }
+      }
+    }
+  }
+
+  private static func parsePmsetAccps(_ output: String) -> [String: AccessoryPowerReading] {
+    var map: [String: AccessoryPowerReading] = [:]
+    for rawLine in output.components(separatedBy: .newlines) {
+      let line = rawLine.trimmingCharacters(in: .whitespaces)
+      guard line.hasPrefix("-") else { continue }
+      guard let pctRange = line.range(of: #"\b(\d{1,3})%"#, options: .regularExpression) else {
+        continue
+      }
+      let pctStr = line[pctRange].dropLast()
+      guard let pct = Int(pctStr), (0...100).contains(pct) else { continue }
+
+      let headerPart: Substring
+      if let idIdx = line.range(of: " (id=") {
+        headerPart = line[line.index(after: line.startIndex)..<idIdx.lowerBound]
+      } else if let tabIdx = line.firstIndex(of: "\t") {
+        headerPart = line[line.index(after: line.startIndex)..<tabIdx]
+      } else {
+        continue
+      }
+      let devName = String(headerPart).trimmingCharacters(in: .whitespaces)
+      let canon = BluetoothPeripheral.canonicalName(devName)
+      guard !canon.isEmpty else { continue }
+
+      // Avoid matching InternalBattery-0 on MacBooks!
+      if canon.hasPrefix("internalbattery") { continue }
+
+      let lower = line.lowercased()
+      let isPresent = lower.contains("present: true")
+      let isCharging =
+        !lower.contains("discharging")
+        && (lower.contains("; charging") || lower.contains("\tcharging") || lower.contains(" charging "))
+
+      map[canon] = AccessoryPowerReading(
+        name: devName,
+        canonicalName: canon,
+        batteryPercent: pct,
+        isCharging: isCharging,
+        isPresent: isPresent
+      )
+    }
+    return map
+  }
+
   // MARK: - Demo Mode Telemetry
 
   private func demoTelemetry(for p: BluetoothPeripheral) -> PeripheralSecurityTelemetry {
@@ -714,6 +1392,12 @@ final class BluetoothDiagnosticsService: ObservableObject {
       if lower.contains("trackpad") { return -54 }
       if lower.contains("mouse") { return -58 }
       return -60
+    }()
+    let sampleBattery: Int = {
+      if lower.contains("keyboard") { return 96 }
+      if lower.contains("trackpad") { return 94 }
+      if lower.contains("mouse") { return 89 }
+      return 92
     }()
     let sampleLatency: Int = {
       if lower.contains("keyboard") { return 310 }
@@ -737,6 +1421,7 @@ final class BluetoothDiagnosticsService: ObservableObject {
       lastConnectedAt: Date().addingTimeInterval(-120),
       lastErrorDescription: nil
     )
+    let demoPeerName = connected ? nil : DemoMode.shared.remotePeerDisplayName(for: p)
     return PeripheralSecurityTelemetry(
       id: DemoMode.maskMAC(p.id),
       name: DemoMode.shared.peripheralDisplayName(p),
@@ -749,7 +1434,11 @@ final class BluetoothDiagnosticsService: ObservableObject {
       deviceClassMajor: 0x05,
       deviceClassMinor: minor,
       vendorName: "Apple, Inc.",
-      stats: st
+      stats: st,
+      batteryPercent: sampleBattery,
+      isCharging: false,
+      activeTransport: connected ? "Bluetooth" : nil,
+      connectedOnPeerName: demoPeerName
     )
   }
 
@@ -761,7 +1450,14 @@ final class BluetoothDiagnosticsService: ObservableObject {
 
   // MARK: - Vendor OUI Lookup
 
-  static func lookupVendor(forMAC mac: String) -> String {
+  static func lookupVendor(forMAC mac: String, deviceName: String = "") -> String {
+    let lowerName = deviceName.lowercased()
+    if lowerName.contains("magic keyboard") || lowerName.contains("magic trackpad")
+      || lowerName.contains("magic mouse") || lowerName.contains("airpods")
+    {
+      return "Apple, Inc."
+    }
+
     let hex =
       mac
       .replacingOccurrences(of: "-", with: ":")
@@ -775,11 +1471,12 @@ final class BluetoothDiagnosticsService: ObservableObject {
       "00:03:93", "00:0A:95", "00:14:51", "00:16:CB", "00:17:F2", "00:19:E3",
       "00:1B:63", "00:1E:52", "00:1F:5B", "00:1F:F3", "00:21:E9", "00:22:41",
       "00:23:12", "00:23:DF", "00:25:00", "00:25:BC", "00:26:08", "00:26:BB",
-      "04:0C:CE", "10:9A:DD", "14:10:9F", "20:C9:D0", "28:CF:DA", "3C:07:54",
-      "40:33:1A", "44:2A:60", "58:55:CA", "60:03:08", "60:FB:42", "64:B9:E8",
-      "70:56:81", "78:31:C1", "7C:6D:62", "84:38:35", "88:63:DF", "8C:85:90",
-      "90:84:0D", "98:01:A7", "A4:5E:60", "AC:BC:32", "B8:E8:56", "C8:2A:14",
-      "D0:A6:37", "DC:2B:2A", "E0:F8:47", "F0:18:98", "F4:5C:89", "F8:1E:DF",
+      "04:0C:CE", "04:41:A5", "10:9A:DD", "14:10:9F", "1C:1A:C0", "20:C9:D0",
+      "28:CF:DA", "38:09:FB", "3C:07:54", "40:33:1A", "44:2A:60", "58:55:CA",
+      "60:03:08", "60:FB:42", "64:B9:E8", "70:56:81", "78:31:C1", "7C:6D:62",
+      "84:38:35", "88:63:DF", "8C:85:90", "90:84:0D", "98:01:A7", "A4:5E:60",
+      "AC:BC:32", "B8:E8:56", "C8:2A:14", "D0:A6:37", "DC:2B:2A", "E0:F8:47",
+      "F0:18:98", "F4:5C:89", "F8:1E:DF",
     ]
     if knownApplePrefixes.contains(prefix) {
       return "Apple, Inc."
@@ -806,6 +1503,45 @@ final class BluetoothDiagnosticsService: ObservableObject {
     guard let data = UserDefaults.standard.data(forKey: statsStorageKey),
       let decoded = try? JSONDecoder().decode([String: PeripheralReliabilityStats].self, from: data)
     else { return }
-    statsByID = decoded
+
+    let alreadyScrubbed = UserDefaults.standard.bool(forKey: scrubbedFlagKey)
+    var normalized: [String: PeripheralReliabilityStats] = [:]
+    var didModify = !alreadyScrubbed
+
+    for (rawKey, var st) in decoded {
+      let canonKey = BluetoothPeripheral.canonicalMAC(rawKey)
+      if canonKey != rawKey { didModify = true }
+      // Scrub legacy background Auto-Heal failure counts accumulated while peripherals were on peer Mac
+      if !alreadyScrubbed || (st.failureCount > 15 && st.failureCount > max(1, st.successCount) * 4) {
+        if st.failureCount > max(2, st.successCount * 2) {
+          st.failureCount = 0
+          st.consecutiveFailures = 0
+          st.lastErrorDescription = nil
+          didModify = true
+        }
+      }
+      normalized[canonKey] = st
+    }
+
+    statsByID = normalized
+    if didModify {
+      UserDefaults.standard.set(true, forKey: scrubbedFlagKey)
+      saveStats()
+    }
+  }
+
+  private func loadBatteryCache() {
+    guard let data = UserDefaults.standard.data(forKey: batteryCacheKey),
+      let decoded = try? JSONDecoder().decode([String: Int].self, from: data)
+    else { return }
+    hidLock.lock()
+    lastKnownBatteryByKey = decoded
+    hidLock.unlock()
+  }
+
+  private func saveBatteryCache(_ snapshot: [String: Int]) {
+    if let data = try? JSONEncoder().encode(snapshot) {
+      UserDefaults.standard.set(data, forKey: batteryCacheKey)
+    }
   }
 }

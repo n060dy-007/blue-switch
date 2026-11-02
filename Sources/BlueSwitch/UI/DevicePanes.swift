@@ -74,13 +74,27 @@ struct PeripheralsPane: View {
           EmptyStateRow(symbol: "dot.radiowaves.left.and.right", text: "No other paired devices found")
         } else {
           ForEach(availableList) { p in
+            let availConnected = s.demoModeEnabled ? false : bt.isConnected(p)
+            let availTel = diag.telemetry(for: p)
             HStack(spacing: 10) {
-              Image(systemName: p.symbolName).frame(width: 24).foregroundStyle(.secondary)
+              Image(systemName: p.symbolName)
+                .frame(width: 24)
+                .foregroundStyle(availConnected ? Theme.blue : .secondary)
               VStack(alignment: .leading, spacing: 1) {
                 Text(demo.peripheralDisplayName(p))
                 Text(demo.peripheralSubtitle(p)).font(.caption.monospaced()).foregroundStyle(.secondary)
               }
               Spacer()
+              if !s.demoModeEnabled, let bat = availTel.batteryDisplay {
+                HStack(spacing: 3) {
+                  Image(systemName: availTel.batterySymbol)
+                  Text(bat).font(.caption.monospacedDigit().weight(.semibold))
+                }
+                .foregroundStyle(availTel.batteryColor)
+              }
+              if availConnected {
+                StatusPill(text: "Connected", color: Theme.green)
+              }
               Button {
                 withAnimation { bt.add(p) }
               } label: {
@@ -98,6 +112,7 @@ struct PeripheralsPane: View {
           Spacer()
           Button {
             bt.refresh()
+            NetworkService.shared.checkAllPeers()
           } label: {
             Label("Refresh", systemImage: "arrow.clockwise")
           }
@@ -276,10 +291,15 @@ struct PeripheralsPane: View {
                 Text("Class: \(t.deviceClassDescription)")
                 Text("·")
                 Text("Vendor: \(t.vendorName)")
+                if let bat = t.batteryDisplay {
+                  Text("·")
+                  Text("Battery: \(bat)")
+                    .foregroundStyle(t.batteryColor)
+                }
                 Text("·")
-                Text("Signal: \(t.rssiDisplay)")
+                Text("Signal: \(demo.sanitizeLog(t.rssiDisplay))")
                 Text("·")
-                Text("Origin: \(t.connectionDirectionLabel)")
+                Text("Origin: \(demo.sanitizeLog(t.connectionDirectionLabel))")
               }
               .font(.caption2)
               .foregroundStyle(.secondary)
@@ -299,6 +319,7 @@ struct PeripheralsPane: View {
       bt.refresh()
       clicker.refreshPermission()
       diag.refreshTelemetry()
+      NetworkService.shared.checkAllPeers()
     }
     .onChange(of: s.demoModeEnabled) { _ in
       lastDeviceTestBanner = nil
@@ -332,6 +353,7 @@ private struct ManagedPeripheralRow: View {
   let tick: Int
   var onTestComplete: ((String) -> Void)? = nil
   @ObservedObject private var bt = BluetoothService.shared
+  @ObservedObject private var net = NetworkService.shared
   @ObservedObject private var demo = DemoMode.shared
   @ObservedObject private var diag = BluetoothDiagnosticsService.shared
   @State private var editing = false
@@ -339,24 +361,48 @@ private struct ManagedPeripheralRow: View {
 
   var body: some View {
     let connected = demo.isPeripheralConnected(peripheral)
+    let remotePeer = demo.remotePeerDisplayName(for: peripheral)
+    let activeAnywhere = connected || remotePeer != nil
     let busy = bt.busyIDs.contains(peripheral.id)
     let testing = diag.testingPeripheralIDs.contains(peripheral.id)
     let t = diag.telemetry(for: peripheral)
+
+    let pillText: String = {
+      if busy { return "Connecting" }
+      if testing { return "Testing" }
+      if connected {
+        return (t.activeTransport == "USB-C") ? "Connected (USB-C)" : "Connected"
+      }
+      if let peerName = remotePeer {
+        return "On \(peerName)"
+      }
+      return "Disconnected"
+    }()
+
+    let pillColor: Color = {
+      if busy || testing { return Theme.amber }
+      if connected { return Theme.green }
+      if remotePeer != nil { return Theme.cyan }
+      return .secondary
+    }()
 
     VStack(alignment: .leading, spacing: 6) {
       HStack(spacing: 12) {
         Image(systemName: peripheral.symbolName)
           .font(.system(size: 16, weight: .semibold))
           .frame(width: 34, height: 34)
-          .background(RoundedRectangle(cornerRadius: 9).fill(connected ? Theme.blue.opacity(0.15) : Color.primary.opacity(0.06)))
-          .foregroundStyle(connected ? Theme.blue : .secondary)
+          .background(
+            RoundedRectangle(cornerRadius: 9).fill(
+              activeAnywhere ? Theme.blue.opacity(0.15) : Color.primary.opacity(0.06))
+          )
+          .foregroundStyle(activeAnywhere ? Theme.blue : .secondary)
 
         VStack(alignment: .leading, spacing: 2) {
           if editing && !demo.isEnabled {
             TextField(peripheral.name, text: $alias, onCommit: commit)
               .textFieldStyle(.roundedBorder).frame(maxWidth: 220)
           } else {
-            HStack(spacing: 4) {
+            HStack(spacing: 6) {
               Text(demo.peripheralDisplayName(peripheral)).font(.body.weight(.medium))
               if !demo.isEnabled {
                 Button {
@@ -366,6 +412,19 @@ private struct ManagedPeripheralRow: View {
                   Image(systemName: "pencil").font(.caption)
                 }
                 .buttonStyle(.borderless).foregroundStyle(.secondary).help("Rename")
+              }
+              if let bat = t.batteryDisplay {
+                HStack(spacing: 3) {
+                  Image(systemName: t.batterySymbol)
+                    .font(.caption)
+                  Text(bat)
+                    .font(.caption.monospacedDigit().weight(.semibold))
+                }
+                .padding(.horizontal, 6)
+                .padding(.vertical, 1)
+                .background(Capsule().fill(t.batteryColor.opacity(0.14)))
+                .foregroundStyle(t.batteryColor)
+                .help("Hardware battery level: \(bat)")
               }
             }
           }
@@ -384,7 +443,7 @@ private struct ManagedPeripheralRow: View {
             }
             if let avgMs = t.stats.averageLatencyMs {
               Text("·").foregroundStyle(.tertiary)
-              Text("\(t.stats.reliabilityPercent)% (\(avgMs) ms)")
+              Text("Avg \(avgMs) ms")
                 .font(.caption2.monospacedDigit())
                 .foregroundStyle(.secondary)
             }
@@ -394,8 +453,8 @@ private struct ManagedPeripheralRow: View {
         Spacer()
 
         StatusPill(
-          text: busy ? "Connecting" : (testing ? "Testing" : (connected ? "Connected" : "Disconnected")),
-          color: (busy || testing) ? Theme.amber : (connected ? Theme.green : .secondary),
+          text: pillText,
+          color: pillColor,
           pulsing: busy || testing)
 
         Toggle("", isOn: Binding(

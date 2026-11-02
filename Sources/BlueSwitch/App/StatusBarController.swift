@@ -36,8 +36,12 @@ final class StatusBarController: NSObject, NSMenuDelegate {
     Publishers.CombineLatest4(
       settings.$menuBarIcon, coordinator.$phase, bt.$refreshTick, settings.$demoModeEnabled
     )
+    .combineLatest(net.$peerPeripheralStatuses)
     .receive(on: DispatchQueue.main)
-    .sink { [weak self] icon, phase, _, _ in self?.updateIcon(icon, phase) }
+    .sink { [weak self] combined, _ in
+      let (icon, phase, _, _) = combined
+      self?.updateIcon(icon, phase)
+    }
     .store(in: &cancellables)
   }
 
@@ -55,12 +59,13 @@ final class StatusBarController: NSObject, NSMenuDelegate {
     image?.isTemplate = true
     button.image = image
     let connState = DemoMode.shared.effectiveConnectionState
+    let summary = DemoMode.shared.connectionSummaryLabel
     // Dim the icon when peripherals are not on this Mac.
     button.appearsDisabled = connState == .allDisconnected && !phase.isWorking
     button.toolTip =
       settings.demoModeEnabled
-      ? "BlueSwitch (DEMO) — \(connState.label)"
-      : "BlueSwitch — \(connState.label)"
+      ? "BlueSwitch (DEMO) — \(summary)"
+      : "BlueSwitch — \(summary)"
   }
 
   // MARK: - Clicks
@@ -149,14 +154,26 @@ final class StatusBarController: NSObject, NSMenuDelegate {
     }
     for p in periList {
       let connected = demo.isPeripheralConnected(p)
+      let remotePeer = demo.remotePeerDisplayName(for: p)
+      let t = BluetoothDiagnosticsService.shared.telemetry(for: p)
+      let stateLabel: String = {
+        if connected {
+          return (t.activeTransport == "USB-C") ? "Connected (USB-C)" : "Connected"
+        }
+        if let peerName = remotePeer {
+          return "On \(peerName)"
+        }
+        return "Not connected"
+      }()
+      let batSuffix = t.batteryDisplay.map { " · \($0)" } ?? ""
+      let pausedSuffix = p.isEnabled ? "" : " (paused)"
       let mi = NSMenuItem(
-        title: "\(demo.peripheralDisplayName(p)) — \(connected ? "Connected" : "Not connected")",
+        title: "\(demo.peripheralDisplayName(p)) — \(stateLabel)\(batSuffix)\(pausedSuffix)",
         action: #selector(togglePeripheral(_:)), keyEquivalent: "")
       mi.target = self
       mi.representedObject = p.id
-      mi.state = connected ? .on : .off
+      mi.state = connected ? .on : (remotePeer != nil ? .mixed : .off)
       mi.image = NSImage(systemSymbolName: p.symbolName, accessibilityDescription: nil)
-      if !p.isEnabled { mi.title += " (excluded)" }
       menu.addItem(mi)
     }
     menu.addItem(.separator())

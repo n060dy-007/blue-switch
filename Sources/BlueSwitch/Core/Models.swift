@@ -13,6 +13,27 @@ struct BluetoothPeripheral: Identifiable, Codable, Hashable {
 
   var displayName: String { alias.isEmpty ? name : alias }
 
+  /// Canonical uppercase colon-separated MAC (`XX:XX:XX:XX:XX:XX`).
+  var canonicalID: String { Self.canonicalMAC(id) }
+
+  /// Normalizes any MAC separator/case (`04-41-a5-9a-f1-4f` -> `04:41:A5:9A:F1:4F`).
+  static func canonicalMAC(_ raw: String) -> String {
+    raw
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+      .replacingOccurrences(of: "-", with: ":")
+      .uppercased()
+  }
+
+  /// Normalizes device names across curly/straight apostrophes and case (`Home’s` == `Home's`).
+  static func canonicalName(_ raw: String) -> String {
+    raw
+      .replacingOccurrences(of: "\u{2019}", with: "'")
+      .replacingOccurrences(of: "\u{2018}", with: "'")
+      .replacingOccurrences(of: "\u{02BC}", with: "'")
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+      .lowercased()
+  }
+
   init(id: String, name: String, alias: String = "", isEnabled: Bool = true) {
     self.id = id
     self.name = name
@@ -96,4 +117,17 @@ enum PeripheralConnectionState {
 
 enum PeerReachability: Equatable {
   case unknown, checking, online, offline
+}
+
+/// Live connection and battery telemetry reported by a peer Mac for its peripherals.
+struct PeerPeripheralStatus: Codable, Hashable, Equatable {
+  var id: String
+  var name: String
+  var isConnected: Bool
+  var batteryPercent: Int?
+  var isCharging: Bool
+  var transport: String?
+
+  var canonicalID: String { BluetoothPeripheral.canonicalMAC(id) }
+  var canonicalName: String { BluetoothPeripheral.canonicalName(name) }
 }
