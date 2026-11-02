@@ -2,6 +2,7 @@ import AppKit
 import CryptoKit
 import Darwin
 import Foundation
+import IOKit
 import OSLog
 import Security
 import SwiftUI
@@ -170,7 +171,7 @@ final class SecureAuditVault: ObservableObject {
     verifiedAt: Date()
   )
   @Published private(set) var keyStorageBackend: String =
-    "macOS Keychain (ThisDeviceOnly · 256-bit)"
+    "Hardware-Bound Vault Key (IOPlatformUUID + 0600 · 256-bit)"
   @Published private(set) var activeVaultBytes: UInt64 = 0
   @Published private(set) var archiveCount: Int = 0
 
@@ -246,7 +247,7 @@ final class SecureAuditVault: ObservableObject {
     self.hmacKey = derivedHMAC
     self.keyStorageBackend = backendDesc
 
-    auditQueue.sync {
+    auditQueue.async {
       self.loadExistingVaultTailSynchronously()
       self.migrateAndShredLegacyPlaintextLogSynchronously()
       if rotatedForKeyChange {
@@ -255,11 +256,11 @@ final class SecureAuditVault: ObservableObject {
           action: "keychain_master_key_rotated",
           outcome: .verified,
           severity: .info,
-          subject: "Audit Vault Keychain",
-          endpoint: "local-keychain",
+          subject: "Audit Vault Key Binding",
+          endpoint: "hardware-uuid+0600-keyfile",
           cipher: "AES-256-GCM + HMAC-SHA256 (HKDF)",
           latencyMs: nil,
-          details: "Initialized fresh device-bound 256-bit master key and archived prior segment read-only (0400)"
+          details: "Initialized fresh hardware-bound 256-bit master key and archived prior segment read-only (0400)"
         )
       } else if self.lastSequence == 0 {
         self.appendRecordSynchronously(
@@ -614,87 +615,89 @@ final class SecureAuditVault: ObservableObject {
     demoRecords = built
   }
 
-  // MARK: - Keychain & HKDF Cryptography
+  // MARK: - Hardware-Bound Key Wrapping & HKDF Cryptography
 
-  private static func loadOrCreateMasterKey(vaultFileURL: URL) -> (SymmetricKey, String, Bool) {
-    let query: [String: Any] = [
-      kSecClass as String: kSecClassGenericPassword,
-      kSecAttrService as String: keychainService,
-      kSecAttrAccount as String: keychainAccount,
-      kSecReturnData as String: true,
-      kSecMatchLimit as String: kSecMatchLimitOne,
-      kSecUseAuthenticationUI as String: kSecUseAuthenticationUISkip,
-    ]
+  /// Reads this Mac's non-migratable hardware platform UUID from `IOPlatformExpertDevice` so an
+  /// off-device copy of `.vault.key` or `connections-security.bsaudit` cannot be decrypted on another machine.
+  private static func hardwarePlatformSecret() -> String {
+    let service = IOServiceGetMatchingService(
+      kIOMainPortDefault, IOServiceMatching("IOPlatformExpertDevice"))
+    guard service != IO_OBJECT_NULL else { return "mac-hardware-local" }
+    defer { IOObjectRelease(service) }
 
-    var result: AnyObject?
-    let status = SecItemCopyMatching(query as CFDictionary, &result)
-    if status == errSecSuccess, let data = result as? Data, data.count == 32 {
-      return (
-        SymmetricKey(data: data),
-        "macOS Keychain (ThisDeviceOnly · 256-bit)",
-        false
-      )
+    var parts: [String] = []
+    if let uuid = IORegistryEntryCreateCFProperty(
+      service, "IOPlatformUUID" as CFString, kCFAllocatorDefault, 0)?.takeRetainedValue() as? String
+    {
+      parts.append(uuid)
     }
-
-    // If an older item existed under a stale ad-hoc binary signature, rotate existing vault file read-only
-    // and replace the Keychain item cleanly without triggering interactive modal prompts.
-    var rotatedExistingVault = false
-    if status != errSecItemNotFound {
-      let deleteQuery: [String: Any] = [
-        kSecClass as String: kSecClassGenericPassword,
-        kSecAttrService as String: keychainService,
-        kSecAttrAccount as String: keychainAccount,
-      ]
-      SecItemDelete(deleteQuery as CFDictionary)
-      if FileManager.default.fileExists(atPath: vaultFileURL.path) {
-        let backupURL = vaultFileURL.deletingLastPathComponent()
-          .appendingPathComponent("connections-security.bsaudit.prevkey")
-        try? FileManager.default.removeItem(at: backupURL)
-        try? FileManager.default.moveItem(at: vaultFileURL, to: backupURL)
-        _ = chmod(backupURL.path, mode_t(0o400))
-        rotatedExistingVault = true
-      }
+    if let serial = IORegistryEntryCreateCFProperty(
+      service, "IOPlatformSerialNumber" as CFString, kCFAllocatorDefault, 0)?.takeRetainedValue()
+      as? String
+    {
+      parts.append(serial)
     }
+    return parts.isEmpty ? "mac-hardware-local" : parts.joined(separator: "|")
+  }
 
-    let newKey = SymmetricKey(size: .bits256)
-    let keyData = newKey.withUnsafeBytes { Data($0) }
-
-    let addQuery: [String: Any] = [
-      kSecClass as String: kSecClassGenericPassword,
-      kSecAttrService as String: keychainService,
-      kSecAttrAccount as String: keychainAccount,
-      kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
-      kSecAttrSynchronizable as String: kCFBooleanFalse as Any,
-      kSecAttrLabel as String: "BlueSwitch Connection Security Audit Master Key",
-      kSecValueData as String: keyData,
-    ]
-
-    let addStatus = SecItemAdd(addQuery as CFDictionary, nil)
-    if addStatus == errSecSuccess {
-      return (
-        newKey,
-        "macOS Keychain (ThisDeviceOnly · 256-bit)",
-        rotatedExistingVault
-      )
-    }
-
-    // Fallback for restricted headless environments where Keychain is unavailable:
-    // store 0600 O_NOFOLLOW keyfile inside 0700 Application Support directory.
-    let fallbackKeyURL = vaultFileURL.deletingLastPathComponent().appendingPathComponent(".vault.key")
-    if let existingData = try? Data(contentsOf: fallbackKeyURL), existingData.count == 32 {
-      _ = chmod(fallbackKeyURL.path, mode_t(0o600))
-      return (
-        SymmetricKey(data: existingData),
-        "Protected Owner-Only Keyfile (0600 · 256-bit)",
-        false
-      )
-    }
-    writeOwnerOnlyFile(data: keyData, to: fallbackKeyURL)
-    return (
-      newKey,
-      "Protected Owner-Only Keyfile (0600 · 256-bit)",
-      rotatedExistingVault
+  private static func deriveHardwareBoundKey(rawSecret: Data) -> SymmetricKey {
+    let hwSalt = Data("BlueSwitch-HWBind-v2|\(hardwarePlatformSecret())".utf8)
+    return HKDF<SHA256>.deriveKey(
+      inputKeyMaterial: SymmetricKey(data: rawSecret),
+      salt: hwSalt,
+      info: Data("BlueSwitch-AuditVault-DeviceBound-MasterKey-v2".utf8),
+      outputByteCount: 32
     )
+  }
+
+  private static func readOwnerOnlyKeyfile(at url: URL) -> Data? {
+    let fd = open(url.path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+    guard fd >= 0 else { return nil }
+    defer { close(fd) }
+    _ = fchmod(fd, mode_t(0o600))
+    var buf = [UInt8](repeating: 0, count: 64)
+    let n = read(fd, &buf, buf.count)
+    guard n == 32 else { return nil }
+    return Data(buf.prefix(32))
+  }
+
+  /// Loads or creates a 256-bit CSPRNG secret (`0600`, `O_NOFOLLOW | O_CLOEXEC`, `isExcludedFromBackup`)
+  /// inside the `0700` vault directory and binds it via HKDF-SHA256 to this Mac's `IOPlatformUUID`.
+  /// Avoids legacy `SecKeychain` `cdhash` ACL prompts that freeze ad-hoc-signed binaries across OTA updates.
+  private static func loadOrCreateMasterKey(vaultFileURL: URL) -> (SymmetricKey, String, Bool) {
+    let backendLabel = "Hardware-Bound Vault Key (IOPlatformUUID + 0600 · 256-bit)"
+    let keyfileURL = vaultFileURL.deletingLastPathComponent().appendingPathComponent(".vault.key")
+
+    if let existingData = readOwnerOnlyKeyfile(at: keyfileURL) {
+      excludeFromBackup(url: keyfileURL)
+      return (deriveHardwareBoundKey(rawSecret: existingData), backendLabel, false)
+    }
+
+    // First run on hardware-bound v2 key (e.g., upgrading from v1.0.9 legacy Keychain item):
+    // archive any prior segment read-only (0400) so the active chain verifies cleanly.
+    var rotatedExistingVault = false
+    if FileManager.default.fileExists(atPath: vaultFileURL.path) {
+      let backupURL = vaultFileURL.deletingLastPathComponent()
+        .appendingPathComponent("connections-security.bsaudit.prevkey")
+      try? FileManager.default.removeItem(at: backupURL)
+      try? FileManager.default.moveItem(at: vaultFileURL, to: backupURL)
+      _ = chmod(backupURL.path, mode_t(0o400))
+      excludeFromBackup(url: backupURL)
+      rotatedExistingVault = true
+    }
+
+    var randomBytes = [UInt8](repeating: 0, count: 32)
+    let rngStatus = SecRandomCopyBytes(kSecRandomDefault, randomBytes.count, &randomBytes)
+    let rawKeyData: Data
+    if rngStatus == errSecSuccess {
+      rawKeyData = Data(randomBytes)
+    } else {
+      let fallback = SymmetricKey(size: .bits256)
+      rawKeyData = fallback.withUnsafeBytes { Data($0) }
+    }
+
+    writeOwnerOnlyFile(data: rawKeyData, to: keyfileURL)
+    return (deriveHardwareBoundKey(rawSecret: rawKeyData), backendLabel, rotatedExistingVault)
   }
 
   private static func deriveSubkeys(from masterKey: SymmetricKey) -> (
