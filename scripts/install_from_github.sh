@@ -32,7 +32,6 @@ echo "▸ Installing to /Applications/BlueSwitch.app …"
 rm -rf /Applications/BlueSwitch.app
 cp -R "$TMP_DIR/extracted/BlueSwitch.app" /Applications/BlueSwitch.app
 xattr -dr com.apple.quarantine /Applications/BlueSwitch.app 2>/dev/null || true
-codesign --force --deep --sign - /Applications/BlueSwitch.app 2>/dev/null || true
 
 echo "▸ Launching BlueSwitch …"
 open /Applications/BlueSwitch.app
