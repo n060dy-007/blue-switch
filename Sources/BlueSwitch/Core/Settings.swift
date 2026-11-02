@@ -110,7 +110,7 @@ enum DemoScenario: String, CaseIterable, Identifiable {
   }
 }
 
-enum LogLevel: Int, CaseIterable, Identifiable, Comparable {
+enum LogLevel: Int, CaseIterable, Identifiable, Comparable, Codable {
   case debug = 0, info, warning, error
   var id: Int { rawValue }
   var label: String {

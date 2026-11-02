@@ -233,6 +233,7 @@ final class DemoMode: ObservableObject {
     demoPeripheralsConnectedHere = true
     activeDemoPeerID = "demo-macbook-pro"
     SecurityMonitor.shared.clearSimulatedIncidents()
+    SecureAuditVault.shared.seedDemoRecords()
     Log.shared.seedDemoEntriesIfEmpty(
       localName: effectiveDemoLocalAlias,
       peerName: effectiveDemoPeerAlias

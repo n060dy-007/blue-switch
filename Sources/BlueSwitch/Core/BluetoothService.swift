@@ -316,16 +316,32 @@ final class BluetoothService: NSObject, ObservableObject {
             let dev = IOBluetoothDevice(addressString: p.id)
             let paired = dev?.isPaired() ?? true
             let encMode = BluetoothDiagnosticsService.queryEncryptionMode(dev)
+            let rssiVal = dev?.rssi() ?? Constants.invalidRSSI
+            let rssiStr = (rssiVal != Constants.invalidRSSI && rssiVal != 0) ? "\(rssiVal) dBm" : "RSSI n/a"
             let ms = Int(Date().timeIntervalSince(startTimes[p.id] ?? Date()) * 1000)
             recordedIDs.insert(p.id)
             BluetoothDiagnosticsService.shared.recordConnectOutcome(
               for: p, succeeded: true, latencyMs: max(15, ms), attemptsUsed: pass,
               isAutoHeal: isAutoHeal)
-            SecurityMonitor.shared.recordAudit(
-              category: "Bluetooth",
-              message:
-                "Connected \(p.displayName) (\(p.id)) in \(ms) ms on attempt \(pass)/\(attempts) [Link Security: \(paired ? "Bonded & Encrypted (HCI Mode \(encMode))" : "Unpaired")]",
-              level: .info
+            let cipherStr =
+              paired
+              ? "Bonded Bluetooth AES/E0 (HCI Mode \(encMode))"
+              : "Unpaired Baseband"
+            SecureAuditVault.shared.logConnection(
+              type: .bluetoothHID,
+              action: isAutoHeal ? "hid_autoheal_reconnected" : "hid_connect_encrypted",
+              outcome: paired ? .authenticated : .established,
+              severity: paired ? .info : .warning,
+              subject: p.displayName,
+              endpoint: p.id.uppercased(),
+              cipher: cipherStr,
+              latencyMs: max(15, ms),
+              details:
+                "Connected on attempt \(pass)/\(attempts) · \(rssiStr)\(isAutoHeal ? " · Auto-Heal recovery" : "")"
+            )
+            Log.info(
+              "Connected \(p.displayName) (\(p.id)) in \(ms) ms on attempt \(pass)/\(attempts) [\(cipherStr)]",
+              "Bluetooth"
             )
             DispatchQueue.main.async {
               SecurityMonitor.shared.scanNow()
@@ -358,12 +374,23 @@ final class BluetoothService: NSObject, ObservableObject {
         for p in list {
           self.busyIDs.remove(p.id)
           if !self.isConnected(p) {
+            let ms = Int(Date().timeIntervalSince(startTimes[p.id] ?? Date()) * 1000)
             if !recordedIDs.contains(p.id) {
-              let ms = Int(Date().timeIntervalSince(startTimes[p.id] ?? Date()) * 1000)
               BluetoothDiagnosticsService.shared.recordConnectOutcome(
                 for: p, succeeded: false, latencyMs: ms, attemptsUsed: attempts,
                 isAutoHeal: isAutoHeal)
             }
+            SecureAuditVault.shared.logConnection(
+              type: .bluetoothHID,
+              action: "hid_connect_failed",
+              outcome: .failed,
+              severity: .warning,
+              subject: p.displayName,
+              endpoint: p.id.uppercased(),
+              cipher: "Bluetooth Baseband",
+              latencyMs: ms,
+              details: "Failed to connect after \(attempts) attempt(s)\(isAutoHeal ? " (Auto-Heal)" : "")"
+            )
             Log.error("Could not connect \(p.displayName) after \(attempts) attempt(s)", "Bluetooth")
           }
         }
@@ -542,11 +569,18 @@ final class BluetoothService: NSObject, ObservableObject {
       let sel = Selector(("remove"))
       if device.responds(to: sel) {
         unpairOnMain(device, name: p.displayName)
-        SecurityMonitor.shared.recordAudit(
-          category: "Bluetooth",
-          message: "Released & unpaired \(p.displayName) (\(p.id)) from this Mac",
-          level: .info
+        SecureAuditVault.shared.logConnection(
+          type: .bluetoothHID,
+          action: "hid_released_unpaired",
+          outcome: .released,
+          severity: .info,
+          subject: p.displayName,
+          endpoint: p.id.uppercased(),
+          cipher: "Bluetooth Bond Cleared",
+          latencyMs: nil,
+          details: "Released & unpaired peripheral for authorized KVM handoff"
         )
+        Log.info("Released & unpaired \(p.displayName) (\(p.id)) from this Mac", "Bluetooth")
       } else {
         Log.warn("Unpair unavailable; closing connection for \(p.displayName)", "Bluetooth")
         device.closeConnection()
@@ -554,11 +588,18 @@ final class BluetoothService: NSObject, ObservableObject {
     case .closeConnection:
       if device.isConnected() {
         let r = device.closeConnection()
-        SecurityMonitor.shared.recordAudit(
-          category: "Bluetooth",
-          message: "Closed Bluetooth connection to \(p.displayName) (\(p.id)) (status \(r))",
-          level: .info
+        SecureAuditVault.shared.logConnection(
+          type: .bluetoothHID,
+          action: "hid_connection_closed",
+          outcome: .released,
+          severity: .info,
+          subject: p.displayName,
+          endpoint: p.id.uppercased(),
+          cipher: "Bonded Bluetooth AES/E0",
+          latencyMs: nil,
+          details: "Closed Bluetooth ACL link (IOReturn \(r))"
         )
+        Log.info("Closed Bluetooth connection to \(p.displayName) (\(p.id)) (status \(r))", "Bluetooth")
       }
     }
   }
@@ -699,10 +740,24 @@ extension BluetoothService: IOBluetoothDevicePairDelegate {
     _ sender: Any!, numericValue: BluetoothNumericValue
   ) {
     session(for: sender)?.handshaking = true
+    let devPair = sender as? IOBluetoothDevicePair
+    let devName = devPair?.device()?.name ?? "Bluetooth Peripheral"
+    let devAddr = (devPair?.device()?.addressString ?? "unknown").replacingOccurrences(of: "-", with: ":").uppercased()
+    SecureAuditVault.shared.logConnection(
+      type: .bluetoothHID,
+      action: "ssp_numeric_confirmation",
+      outcome: .authenticated,
+      severity: .info,
+      subject: devName,
+      endpoint: devAddr,
+      cipher: "Bluetooth SSP ECDH Numeric Comparison",
+      latencyMs: nil,
+      details: "Confirmed Secure Simple Pairing numeric comparison handshake"
+    )
     Log.info(
       "Bluetooth pairing confirmation requested (code: \(numericValue)) — auto-confirming",
       "Bluetooth")
-    if let pair = sender as? IOBluetoothDevicePair {
+    if let pair = devPair {
       pair.replyUserConfirmation(true)
     } else {
       for pair in activePairs.values {
@@ -716,13 +771,27 @@ extension BluetoothService: IOBluetoothDevicePairDelegate {
 
   func devicePairingPINCodeRequest(_ sender: Any!) {
     session(for: sender)?.handshaking = true
+    let devPair = sender as? IOBluetoothDevicePair
+    let devName = devPair?.device()?.name ?? "Bluetooth Peripheral"
+    let devAddr = (devPair?.device()?.addressString ?? "unknown").replacingOccurrences(of: "-", with: ":").uppercased()
+    SecureAuditVault.shared.logConnection(
+      type: .bluetoothHID,
+      action: "legacy_pin_pairing",
+      outcome: .established,
+      severity: .warning,
+      subject: devName,
+      endpoint: devAddr,
+      cipher: "Legacy Bluetooth PIN (E0)",
+      latencyMs: nil,
+      details: "Replied to legacy PIN code pairing request"
+    )
     Log.info("Bluetooth PIN code requested — replying with default 0000", "Bluetooth")
     var pin = BluetoothPINCode()
     pin.data.0 = 0x30
     pin.data.1 = 0x30
     pin.data.2 = 0x30
     pin.data.3 = 0x30
-    if let pair = sender as? IOBluetoothDevicePair {
+    if let pair = devPair {
       pair.replyPINCode(4, pinCode: &pin)
     } else {
       for pair in activePairs.values {

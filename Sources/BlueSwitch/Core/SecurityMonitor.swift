@@ -64,10 +64,7 @@ final class SecurityMonitor: ObservableObject {
   ]
 
   private init() {
-    let logsDir = FileManager.default.homeDirectoryForCurrentUser
-      .appendingPathComponent("Library/Logs/BlueSwitch", isDirectory: true)
-    try? FileManager.default.createDirectory(at: logsDir, withIntermediateDirectories: true)
-    self.auditLogFilePath = logsDir.appendingPathComponent("security-audit.log").path
+    self.auditLogFilePath = SecureAuditVault.shared.vaultFilePath
   }
 
   // MARK: - Lifecycle
@@ -97,7 +94,7 @@ final class SecurityMonitor: ObservableObject {
     }
   }
 
-  // MARK: - Persistent Security Audit Logging
+  // MARK: - Persistent Encrypted Security Audit Logging
 
   func recordAudit(category: String, message: String, level: LogLevel = .info) {
     switch level {
@@ -107,21 +104,38 @@ final class SecurityMonitor: ObservableObject {
     case .error: Log.error(message, category)
     }
 
-    let timestamp = ISO8601DateFormatter().string(from: Date())
-    let line = "\(timestamp) [\(level.label.uppercased())] [\(category)] \(message)\n"
-    let path = auditLogFilePath
-    fileQueue.async {
-      guard let data = line.data(using: .utf8) else { return }
-      if FileManager.default.fileExists(atPath: path),
-        let handle = FileHandle(forWritingAtPath: path)
-      {
-        defer { try? handle.close() }
-        _ = try? handle.seekToEnd()
-        try? handle.write(contentsOf: data)
-      } else {
-        try? data.write(to: URL(fileURLWithPath: path), options: .atomic)
-      }
+    let type: ConnectionAuditType
+    let cipher: String
+    switch category {
+    case "NetworkSecurity":
+      type = .networkInbound
+      cipher = AppSettings.shared.encryptNetworkTraffic ? "AES-256-GCM + HKDF-SHA256" : "Plaintext TCP"
+    case "BluetoothSecurity", "BluetoothReliability", "BluetoothTest":
+      type = .bluetoothHID
+      cipher = "Bonded Bluetooth AES/E0"
+    default:
+      type = .securityGuard
+      cipher = "WindowServer EventTap Guard"
     }
+
+    let outcome: ConnectionAuditOutcome
+    switch level {
+    case .error: outcome = .blocked
+    case .warning: outcome = .failed
+    case .info, .debug: outcome = .verified
+    }
+
+    SecureAuditVault.shared.logConnection(
+      type: type,
+      action: category.lowercased(),
+      outcome: outcome,
+      severity: level,
+      subject: category,
+      endpoint: "local-host",
+      cipher: cipher,
+      latencyMs: nil,
+      details: message
+    )
   }
 
   // MARK: - Keystroke & Mouse Movement Surveillance Detection
@@ -401,6 +415,19 @@ final class SecurityMonitor: ObservableObject {
       .error, "Security",
       "SIMULATED SECURITY ALERT: Keystrokes & Mouse Movement monitor test triggered — auto-remediation verified."
     )
+    if DemoMode.shared.isEnabled {
+      SecureAuditVault.shared.logDemoConnection(
+        type: .securityGuard,
+        action: "unauthorized_event_tap_blocked",
+        outcome: .blocked,
+        severity: .error,
+        subject: "SimulatedKeyloggerTest (PID -999)",
+        endpoint: "/tmp/SimulatedKeyloggerTest",
+        cipher: "SIGSTOP+SIGKILL + HID Evacuate",
+        latencyMs: 1,
+        details: "Simulated keystroke & mouse movement tap blocked and auto-remediated"
+      )
+    }
     recordAudit(
       category: "Security",
       message:

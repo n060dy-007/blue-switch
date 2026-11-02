@@ -405,16 +405,19 @@ struct NetworkPane: View {
               ? "Active (\(sec.activeTapCount) system event tap(s) inspected)"
               : "Paused"))
         HStack {
-          Text("Persistent security log")
+          VStack(alignment: .leading, spacing: 2) {
+            Text("Encrypted connection audit vault")
+            Text("AES-256-GCM + HMAC-SHA256 hash chain · Keychain master key · 0700/0600")
+              .font(.caption2).foregroundStyle(.secondary)
+          }
           Spacer()
-          Text(
-            s.demoModeEnabled
-              ? "~/Library/Logs/BlueSwitch/security-audit.log"
-              : demo.sanitizePath(sec.auditLogFilePath)
-          )
-          .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+          Button("Open Security Logs…") {
+            SettingsNavigation.shared.selection = .securityLogs
+          }
+          .controlSize(.small)
           Button("Reveal in Finder") {
-            NSWorkspace.shared.selectFile(sec.auditLogFilePath, inFileViewerRootedAtPath: "")
+            NSWorkspace.shared.selectFile(
+              SecureAuditVault.shared.vaultFilePath, inFileViewerRootedAtPath: "")
           }
           .controlSize(.small)
           .disabled(s.demoModeEnabled)

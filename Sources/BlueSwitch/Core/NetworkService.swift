@@ -106,10 +106,34 @@ final class NetworkService: ObservableObject {
           case .ready:
             self.listeningPort = l?.port?.rawValue
             self.listenerStatus = "Listening"
-            Log.info("Listening on port \(self.listeningPort ?? 0)", "Network")
+            let portVal = self.listeningPort ?? 0
+            Log.info("Listening on port \(portVal)", "Network")
+            SecureAuditVault.shared.logConnection(
+              type: .bonjourDiscovery,
+              action: "listener_published",
+              outcome: .established,
+              severity: .info,
+              subject: self.publishedName ?? self.settings.effectiveDeviceName,
+              endpoint: "\(self.settings.effectiveServiceType) · 0.0.0.0:\(portVal)",
+              cipher: self.settings.encryptNetworkTraffic ? PeerCrypto.cipherName : "Plaintext TCP",
+              latencyMs: nil,
+              details:
+                "TCP listener & Bonjour advertisement ready (requireEncrypted=\(self.settings.requireEncryptedConnections))"
+            )
           case .failed(let e):
             self.listenerStatus = "Failed: \(e.localizedDescription)"
             Log.error("Listener failed: \(e)", "Network")
+            SecureAuditVault.shared.logConnection(
+              type: .bonjourDiscovery,
+              action: "listener_failed",
+              outcome: .failed,
+              severity: .error,
+              subject: self.settings.effectiveDeviceName,
+              endpoint: self.settings.effectiveServiceType,
+              cipher: PeerCrypto.cipherName,
+              latencyMs: nil,
+              details: "TCP listener failed: \(e.localizedDescription)"
+            )
           case .cancelled:
             self.listenerStatus = "Stopped"
           case .waiting(let e):
@@ -129,17 +153,34 @@ final class NetworkService: ObservableObject {
 
   private func accept(_ conn: NWConnection) {
     let remoteDesc = conn.endpoint.debugDescription
-    SecurityMonitor.shared.recordAudit(
-      category: "Network",
-      message: "Accepted incoming TCP connection from \(remoteDesc)",
-      level: .debug
+    SecureAuditVault.shared.logConnection(
+      type: .networkInbound,
+      action: "tcp_accept",
+      outcome: .established,
+      severity: .debug,
+      subject: "Inbound Peer Socket",
+      endpoint: remoteDesc,
+      cipher: settings.encryptNetworkTraffic ? PeerCrypto.cipherName : "TCP",
+      latencyMs: nil,
+      details: "Accepted inbound TCP socket; awaiting AES-256-GCM authenticated frame"
     )
     let server = ServerConnection(connection: conn, queue: queue) {
       [weak self] msg, remoteEndpoint, reply in
       self?.handleIncoming(msg, remoteEndpoint: remoteEndpoint, reply: reply)
     }
     let key = ObjectIdentifier(server)
-    server.onClose = { [weak self] in
+    server.onClose = { [weak self] closeReason, resolvedEndpoint in
+      SecureAuditVault.shared.logConnection(
+        type: .networkInbound,
+        action: "tcp_close",
+        outcome: .released,
+        severity: .debug,
+        subject: "Inbound Peer Socket",
+        endpoint: resolvedEndpoint,
+        cipher: PeerCrypto.cipherName,
+        latencyMs: nil,
+        details: closeReason
+      )
       DispatchQueue.main.async { self?.serverConnections[key] = nil }
     }
     DispatchQueue.main.async { self.serverConnections[key] = server }
@@ -149,17 +190,28 @@ final class NetworkService: ObservableObject {
   private func handleIncoming(
     _ msg: PeerMessage, remoteEndpoint: String, reply: @escaping (PeerMessage) -> Void
   ) {
+    let receivedAt = Date()
     DispatchQueue.main.async {
       let encrypted = msg.isEncryptedOnWire == true
       let cipherLabel = encrypted ? PeerCrypto.cipherName : "UNENCRYPTED-LEGACY"
 
       // Enforce encryption requirement for control commands if requireEncryptedConnections is on
       if self.settings.requireEncryptedConnections && !encrypted && msg.kind != .ping {
-        SecurityMonitor.shared.recordAudit(
-          category: "Security",
-          message:
-            "REJECTED unencrypted \(msg.kind.rawValue) from \(msg.sender) (\(remoteEndpoint)) — AES-256-GCM encryption required",
-          level: .error
+        SecureAuditVault.shared.logConnection(
+          type: .networkInbound,
+          action: "inbound_\(msg.kind.rawValue)_rejected",
+          outcome: .blocked,
+          severity: .error,
+          subject: msg.sender,
+          endpoint: remoteEndpoint,
+          cipher: cipherLabel,
+          latencyMs: Int(Date().timeIntervalSince(receivedAt) * 1000),
+          details:
+            "Blocked unencrypted remote \(msg.kind.rawValue) command — AES-256-GCM encryption required"
+        )
+        Log.error(
+          "REJECTED unencrypted \(msg.kind.rawValue) from \(msg.sender) (\(remoteEndpoint)) — AES-256-GCM required",
+          "Security"
         )
         NotificationService.post(
           title: "Blocked Unencrypted Peer Request",
@@ -175,11 +227,20 @@ final class NetworkService: ObservableObject {
       // Legacy fallback key check if unencrypted ping arrives
       let expected = self.settings.pairingKey
       if !encrypted && !expected.isEmpty && msg.key != expected {
-        SecurityMonitor.shared.recordAudit(
-          category: "Security",
-          message:
-            "Rejected \(msg.kind.rawValue) from \(msg.sender) (\(remoteEndpoint)): pairing key mismatch",
-          level: .warning
+        SecureAuditVault.shared.logConnection(
+          type: .networkInbound,
+          action: "inbound_key_mismatch",
+          outcome: .blocked,
+          severity: .warning,
+          subject: msg.sender,
+          endpoint: remoteEndpoint,
+          cipher: cipherLabel,
+          latencyMs: Int(Date().timeIntervalSince(receivedAt) * 1000),
+          details: "Rejected \(msg.kind.rawValue): pairing key mismatch"
+        )
+        Log.warn(
+          "Rejected \(msg.kind.rawValue) from \(msg.sender) (\(remoteEndpoint)): pairing key mismatch",
+          "Security"
         )
         var e = PeerMessage.make(.error)
         e.body = "Pairing key mismatch"
@@ -187,19 +248,27 @@ final class NetworkService: ObservableObject {
         return
       }
 
-      let logLevel: LogLevel = (msg.kind == .ping) ? .debug : .info
-      SecurityMonitor.shared.recordAudit(
-        category: "Network",
-        message:
-          "Authenticated incoming \(msg.kind.rawValue) from \(msg.sender) (\(remoteEndpoint)) [\(cipherLabel)]",
-        level: logLevel
-      )
-
       guard let handler = self.requestHandler else {
         reply(PeerMessage.make(.error))
         return
       }
-      handler(msg, reply)
+      handler(msg) { response in
+        let ms = max(1, Int(Date().timeIntervalSince(receivedAt) * 1000))
+        let severity: LogLevel = (msg.kind == .ping) ? .debug : .info
+        SecureAuditVault.shared.logConnection(
+          type: .networkInbound,
+          action: "inbound_\(msg.kind.rawValue)",
+          outcome: response.kind == .error ? .failed : .authenticated,
+          severity: severity,
+          subject: msg.sender,
+          endpoint: remoteEndpoint,
+          cipher: cipherLabel,
+          latencyMs: ms,
+          details:
+            "Authenticated inbound \(msg.kind.rawValue) -> replied \(response.kind.rawValue)\(response.body.map { " (\($0))" } ?? "")"
+        )
+        reply(response)
+      }
     }
   }
 
@@ -235,9 +304,21 @@ final class NetworkService: ObservableObject {
     for change in changes {
       switch change {
       case .added(let r):
-        guard case .service(let name, _, _, _) = r.endpoint, name != ownName else { continue }
+        guard case .service(let name, let svcType, let svcDomain, _) = r.endpoint, name != ownName
+        else { continue }
         endpoints[name] = r.endpoint
         Log.info("Discovered \(name)", "Network")
+        SecureAuditVault.shared.logConnection(
+          type: .bonjourDiscovery,
+          action: "peer_discovered",
+          outcome: .established,
+          severity: .info,
+          subject: name,
+          endpoint: "\(svcType).\(svcDomain)",
+          cipher: "mDNS + \(PeerCrypto.cipherName)",
+          latencyMs: nil,
+          details: "Discovered Bonjour peer service \"\(name)\"; initiating authenticated health check"
+        )
         if !peers.contains(where: { $0.id == name }) && !discovered.contains(where: { $0.id == name })
         {
           discovered.append(PeerDevice(id: name, name: name, host: "", port: 0))
@@ -248,11 +329,22 @@ final class NetworkService: ObservableObject {
         }
         ping(id: name)
       case .removed(let r):
-        guard case .service(let name, _, _, _) = r.endpoint else { continue }
+        guard case .service(let name, let svcType, _, _) = r.endpoint else { continue }
         endpoints[name] = nil
         discovered.removeAll { $0.id == name }
         reachability[name] = .offline
         Log.info("\(name) went away", "Network")
+        SecureAuditVault.shared.logConnection(
+          type: .bonjourDiscovery,
+          action: "peer_removed",
+          outcome: .released,
+          severity: .info,
+          subject: name,
+          endpoint: svcType,
+          cipher: "mDNS",
+          latencyMs: nil,
+          details: "Bonjour peer service \"\(name)\" withdrew from local network"
+        )
       default:
         break
       }
@@ -321,17 +413,57 @@ final class NetworkService: ObservableObject {
     completion: @escaping (Result<PeerMessage, PeerError>) -> Void
   ) {
     guard let ep = endpoint(for: peer.id) else {
+      SecureAuditVault.shared.logConnection(
+        type: .networkOutbound,
+        action: "outbound_\(message.kind.rawValue)",
+        outcome: .failed,
+        severity: .warning,
+        subject: peer.name,
+        endpoint: peer.host.isEmpty ? "unresolved" : "\(peer.host):\(peer.port)",
+        cipher: settings.encryptNetworkTraffic ? PeerCrypto.cipherName : "UNENCRYPTED",
+        latencyMs: nil,
+        details: "Outbound \(message.kind.rawValue) aborted: peer endpoint not resolved"
+      )
       completion(.failure(.invalidEndpoint))
       return
     }
     let t = timeout ?? settings.commandTimeout
     let cipher = settings.encryptNetworkTraffic ? PeerCrypto.cipherName : "UNENCRYPTED"
-    SecurityMonitor.shared.recordAudit(
-      category: "Network",
-      message: "Sending \(message.kind.rawValue) to \(peer.name) (\(ep)) [\(cipher)]",
-      level: .info
-    )
+    let startedAt = Date()
     PeerRequest(endpoint: ep, message: message, timeout: max(1, t)) { [weak self] result, remote in
+      let ms = max(1, Int(Date().timeIntervalSince(startedAt) * 1000))
+      let resolvedStr = Self.formatEndpoint(remote ?? ep)
+      switch result {
+      case .success(let replyMsg):
+        let replyCipher =
+          (replyMsg.isEncryptedOnWire == true) ? PeerCrypto.cipherName : cipher
+        SecureAuditVault.shared.logConnection(
+          type: .networkOutbound,
+          action: "outbound_\(message.kind.rawValue)",
+          outcome: .authenticated,
+          severity: .info,
+          subject: peer.name,
+          endpoint: resolvedStr,
+          cipher: replyCipher,
+          latencyMs: ms,
+          details:
+            "Completed \(message.kind.rawValue) -> \(replyMsg.kind.rawValue) in \(ms) ms (peer v\(replyMsg.appVersion ?? "?"))"
+        )
+      case .failure(let err):
+        let blocked: Bool
+        if case .rejected = err { blocked = true } else { blocked = false }
+        SecureAuditVault.shared.logConnection(
+          type: .networkOutbound,
+          action: "outbound_\(message.kind.rawValue)",
+          outcome: blocked ? .blocked : .failed,
+          severity: .warning,
+          subject: peer.name,
+          endpoint: resolvedStr,
+          cipher: cipher,
+          latencyMs: ms,
+          details: "Outbound \(message.kind.rawValue) failed: \(err.localizedDescription)"
+        )
+      }
       self?.recordResult(id: peer.id, result: result, remote: remote)
       completion(result)
     }.start()
@@ -345,12 +477,57 @@ final class NetworkService: ObservableObject {
       return
     }
     if reachability[id] != .online { reachability[id] = .checking }
+    let startedAt = Date()
+    let cipher = settings.encryptNetworkTraffic ? PeerCrypto.cipherName : "UNENCRYPTED"
     PeerRequest(
       endpoint: ep, message: .make(.ping), timeout: max(1, settings.healthCheckTimeout)
     ) { [weak self] result, remote in
+      let ms = max(1, Int(Date().timeIntervalSince(startedAt) * 1000))
+      let resolvedStr = Self.formatEndpoint(remote ?? ep)
+      let peerLabel =
+        self?.peers.first(where: { $0.id == id })?.name
+        ?? self?.discovered.first(where: { $0.id == id })?.name
+        ?? id
+      switch result {
+      case .success(let replyMsg):
+        SecureAuditVault.shared.logConnection(
+          type: .networkOutbound,
+          action: "outbound_ping",
+          outcome: .authenticated,
+          severity: .debug,
+          subject: peerLabel,
+          endpoint: resolvedStr,
+          cipher: (replyMsg.isEncryptedOnWire == true) ? PeerCrypto.cipherName : cipher,
+          latencyMs: ms,
+          details: "Health check authenticated in \(ms) ms (peer v\(replyMsg.appVersion ?? "?"))"
+        )
+      case .failure(let err):
+        SecureAuditVault.shared.logConnection(
+          type: .networkOutbound,
+          action: "outbound_ping",
+          outcome: .failed,
+          severity: .debug,
+          subject: peerLabel,
+          endpoint: resolvedStr,
+          cipher: cipher,
+          latencyMs: ms,
+          details: "Health check failed after \(ms) ms: \(err.localizedDescription)"
+        )
+      }
       self?.recordResult(id: id, result: result, remote: remote)
       completion?(result)
     }.start()
+  }
+
+  private static func formatEndpoint(_ endpoint: NWEndpoint) -> String {
+    if case .hostPort(let host, let port) = endpoint {
+      var h = "\(host)"
+      if let pct = h.firstIndex(of: "%"), !h.contains(":") {
+        h = String(h[..<pct])
+      }
+      return "\(h):\(port.rawValue)"
+    }
+    return endpoint.debugDescription
   }
 
   func checkAllPeers() {
@@ -431,7 +608,8 @@ final class ServerConnection {
   private let queue: DispatchQueue
   private let handler: (PeerMessage, String, @escaping (PeerMessage) -> Void) -> Void
   private var buffer = LineBuffer()
-  var onClose: (() -> Void)?
+  private var didClose = false
+  var onClose: ((String, String) -> Void)?
 
   init(
     connection: NWConnection, queue: DispatchQueue,
@@ -444,8 +622,21 @@ final class ServerConnection {
 
   func start() {
     connection.stateUpdateHandler = { [weak self] state in
+      guard let self else { return }
+      let ep =
+        self.connection.currentPath?.remoteEndpoint?.debugDescription
+        ?? self.connection.endpoint.debugDescription
       switch state {
-      case .failed, .cancelled: self?.onClose?()
+      case .failed(let err):
+        if !self.didClose {
+          self.didClose = true
+          self.onClose?("Socket failed: \(err.localizedDescription)", ep)
+        }
+      case .cancelled:
+        if !self.didClose {
+          self.didClose = true
+          self.onClose?("Inbound TCP session closed", ep)
+        }
       default: break
       }
     }
@@ -472,11 +663,20 @@ final class ServerConnection {
             }
           case .securityError(let sender, let reason):
             DispatchQueue.main.async {
-              SecurityMonitor.shared.recordAudit(
-                category: "Security",
-                message:
-                  "SECURITY ALERT: Blocked tampered or unauthenticated message from \(sender) (\(remoteDesc)): \(reason)",
-                level: .error
+              SecureAuditVault.shared.logConnection(
+                type: .networkInbound,
+                action: "auth_or_replay_blocked",
+                outcome: .blocked,
+                severity: .error,
+                subject: sender,
+                endpoint: remoteDesc,
+                cipher: PeerCrypto.cipherName,
+                latencyMs: nil,
+                details: "Blocked tampered/unauthenticated/replayed frame: \(reason)"
+              )
+              Log.error(
+                "SECURITY ALERT: Blocked tampered or unauthenticated message from \(sender) (\(remoteDesc)): \(reason)",
+                "Security"
               )
               NotificationService.post(
                 title: "⚠️ Blocked Unauthenticated Network Request",

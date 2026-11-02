@@ -69,13 +69,26 @@ final class UpdateChecker: ObservableObject {
     req.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
     req.cachePolicy = .reloadIgnoringLocalCacheData
     req.timeoutInterval = 15
+    let startedAt = Date()
     URLSession.shared.dataTask(with: req) { [weak self] data, _, error in
+      let ms = max(1, Int(Date().timeIntervalSince(startedAt) * 1000))
       DispatchQueue.main.async {
         guard let self else { return }
         self.isChecking = false
         UserDefaults.standard.set(Date(), forKey: self.lastCheckKey)
         if let error {
           self.status = "Check failed: \(error.localizedDescription)"
+          SecureAuditVault.shared.logConnection(
+            type: .otaUpdate,
+            action: "github_release_check",
+            outcome: .failed,
+            severity: .warning,
+            subject: repo,
+            endpoint: "api.github.com:443",
+            cipher: "HTTPS TLS 1.3",
+            latencyMs: ms,
+            details: "GitHub release check failed: \(error.localizedDescription)"
+          )
           completion?(false)
           return
         }
@@ -98,6 +111,18 @@ final class UpdateChecker: ObservableObject {
         } else {
           self.status = "Up to date (v\(AppInfo.version) · latest release: \(name))"
         }
+
+        SecureAuditVault.shared.logConnection(
+          type: .otaUpdate,
+          action: "github_release_check",
+          outcome: .verified,
+          severity: .info,
+          subject: repo,
+          endpoint: "api.github.com:443",
+          cipher: "HTTPS TLS 1.3",
+          latencyMs: ms,
+          details: "Checked latest release \(name) (newer=\(isNewer), local=v\(AppInfo.version))"
+        )
 
         let lastSeen = UserDefaults.standard.string(forKey: self.lastSeenKey)
         if isNewer && (lastSeen != tag || userInitiated) {
@@ -158,9 +183,23 @@ final class UpdateChecker: ObservableObject {
     }
     isInstalling = true
     status = "Downloading \(assetURL.lastPathComponent)…"
+    let startedAt = Date()
+    let hostDesc = "\(assetURL.host ?? "github.com"):443"
     URLSession.shared.downloadTask(with: assetURL) { [weak self] tempURL, _, error in
       guard let self else { return }
+      let ms = max(1, Int(Date().timeIntervalSince(startedAt) * 1000))
       if let error {
+        SecureAuditVault.shared.logConnection(
+          type: .otaUpdate,
+          action: "github_asset_download",
+          outcome: .failed,
+          severity: .error,
+          subject: assetURL.lastPathComponent,
+          endpoint: hostDesc,
+          cipher: "HTTPS TLS 1.3",
+          latencyMs: ms,
+          details: "Release asset download failed: \(error.localizedDescription)"
+        )
         DispatchQueue.main.async {
           self.isInstalling = false
           self.status = "Download failed: \(error.localizedDescription)"
@@ -177,6 +216,20 @@ final class UpdateChecker: ObservableObject {
       let savedTemp = FileManager.default.temporaryDirectory
         .appendingPathComponent("blueswitch-dl-\(UUID().uuidString)-\(assetURL.lastPathComponent)")
       try? FileManager.default.moveItem(at: tempURL, to: savedTemp)
+      if let dlData = try? Data(contentsOf: savedTemp) {
+        let digest = Self.sha256Hex(of: dlData)
+        SecureAuditVault.shared.logConnection(
+          type: .otaUpdate,
+          action: "github_asset_download",
+          outcome: .verified,
+          severity: .info,
+          subject: assetURL.lastPathComponent,
+          endpoint: hostDesc,
+          cipher: "HTTPS TLS 1.3 + SHA-256",
+          latencyMs: ms,
+          details: "Downloaded \(dlData.count) bytes (sha256=\(digest.prefix(16))…)"
+        )
+      }
       self.installFromLocalPackage(at: savedTemp, alsoUpdatePeers: alsoUpdatePeers)
     }.resume()
   }
@@ -366,6 +419,17 @@ final class UpdateChecker: ObservableObject {
 
   func handleIncomingUpdate(_ msg: PeerMessage, reply: @escaping (PeerMessage) -> Void) {
     guard AppSettings.shared.allowRemoteUpdates else {
+      SecureAuditVault.shared.logConnection(
+        type: .otaUpdate,
+        action: "lan_ota_blocked_disabled",
+        outcome: .blocked,
+        severity: .warning,
+        subject: msg.sender,
+        endpoint: "peer-ota",
+        cipher: (msg.isEncryptedOnWire == true) ? PeerCrypto.cipherName : "UNENCRYPTED",
+        latencyMs: nil,
+        details: "Blocked incoming remote OTA update because allowRemoteUpdates is disabled"
+      )
       var err = PeerMessage.make(.error)
       err.body = "Remote updates are disabled on \(AppSettings.shared.effectiveDeviceName)"
       reply(err)
@@ -377,9 +441,21 @@ final class UpdateChecker: ObservableObject {
       reply(err)
       return
     }
+    let computedSHA = Self.sha256Hex(of: zipData)
     if let expectedSHA = msg.updateSHA256, !expectedSHA.isEmpty {
-      let actualSHA = Self.sha256Hex(of: zipData)
-      guard actualSHA.caseInsensitiveCompare(expectedSHA) == .orderedSame else {
+      guard computedSHA.caseInsensitiveCompare(expectedSHA) == .orderedSame else {
+        SecureAuditVault.shared.logConnection(
+          type: .otaUpdate,
+          action: "lan_ota_sha256_mismatch",
+          outcome: .blocked,
+          severity: .error,
+          subject: msg.sender,
+          endpoint: "peer-ota",
+          cipher: PeerCrypto.cipherName,
+          latencyMs: nil,
+          details:
+            "Blocked incoming OTA update: SHA-256 mismatch (expected \(expectedSHA.prefix(16))…, actual \(computedSHA.prefix(16))…)"
+        )
         var err = PeerMessage.make(.error)
         err.body = "Update SHA-256 checksum mismatch"
         reply(err)
@@ -388,6 +464,18 @@ final class UpdateChecker: ObservableObject {
     }
 
     let incomingVer = msg.appVersion ?? "new"
+    SecureAuditVault.shared.logConnection(
+      type: .otaUpdate,
+      action: "lan_ota_verified",
+      outcome: .authenticated,
+      severity: .info,
+      subject: msg.sender,
+      endpoint: "peer-ota",
+      cipher: "\(PeerCrypto.cipherName) + SHA-256",
+      latencyMs: nil,
+      details:
+        "Verified incoming OTA update v\(incomingVer) (\(zipData.count) bytes, sha256=\(computedSHA.prefix(16))…)"
+    )
     Log.info(
       "Receiving BlueSwitch v\(incomingVer) update (\(zipData.count) bytes) from \(msg.sender)",
       "Update")

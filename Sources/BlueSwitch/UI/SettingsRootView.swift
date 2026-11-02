@@ -1,8 +1,8 @@
 import SwiftUI
 
 enum SettingsPane: String, CaseIterable, Identifiable {
-  case general, switching, peripherals, devices, network, notifications, shortcuts, demo, advanced
-  case activity, about
+  case general, switching, peripherals, devices, network, notifications, shortcuts, demo
+  case securityLogs, advanced, activity, about
 
   var id: String { rawValue }
 
@@ -16,6 +16,7 @@ enum SettingsPane: String, CaseIterable, Identifiable {
     case .notifications: return "Notifications"
     case .shortcuts: return "Shortcuts"
     case .demo: return "Demo Mode"
+    case .securityLogs: return "Security Logs"
     case .advanced: return "Advanced"
     case .activity: return "Activity Log"
     case .about: return "About"
@@ -32,6 +33,7 @@ enum SettingsPane: String, CaseIterable, Identifiable {
     case .notifications: return "Which events alert you, and how"
     case .shortcuts: return "System-wide keyboard shortcuts"
     case .demo: return "Privacy redaction, scenario presets & hands-free showcase"
+    case .securityLogs: return "AES-256-GCM encrypted & HMAC-SHA256 hash-chained connection vault"
     case .advanced: return "Logging, diagnostics, backup and reset"
     case .activity: return "Live log of what BlueSwitch is doing"
     case .about: return "Version, credits and license"
@@ -48,6 +50,7 @@ enum SettingsPane: String, CaseIterable, Identifiable {
     case .notifications: return "bell.badge.fill"
     case .shortcuts: return "command"
     case .demo: return "video.fill"
+    case .securityLogs: return "lock.doc.fill"
     case .advanced: return "wrench.and.screwdriver.fill"
     case .activity: return "list.bullet.rectangle.fill"
     case .about: return "info.circle.fill"
@@ -64,6 +67,7 @@ enum SettingsPane: String, CaseIterable, Identifiable {
     case .notifications: return Theme.red
     case .shortcuts: return .purple
     case .demo: return Theme.amber
+    case .securityLogs: return Theme.green
     case .advanced: return .orange
     case .activity: return .teal
     case .about: return Theme.blue
@@ -73,7 +77,7 @@ enum SettingsPane: String, CaseIterable, Identifiable {
   static let groups: [(String, [SettingsPane])] = [
     ("Setup", [.peripherals, .devices]),
     ("Preferences", [.general, .switching, .network, .notifications, .shortcuts, .demo]),
-    ("Support", [.advanced, .activity, .about]),
+    ("Support", [.securityLogs, .advanced, .activity, .about]),
   ]
 }
 
@@ -153,6 +157,11 @@ struct SettingsRootView: View {
           .padding(.horizontal, 6).padding(.vertical, 1)
           .background(Capsule().fill(Theme.amber))
           .foregroundStyle(.black)
+      } else if pane == .securityLogs {
+        let valid = SecureAuditVault.shared.effectiveVerification.isValid
+        Image(systemName: valid ? "checkmark.seal.fill" : "exclamationmark.triangle.fill")
+          .font(.caption2)
+          .foregroundStyle(valid ? Theme.green : Theme.red)
       }
     }
   }
@@ -172,6 +181,7 @@ struct SettingsRootView: View {
     case .notifications: NotificationsPane()
     case .shortcuts: ShortcutsPane()
     case .demo: DemoPane()
+    case .securityLogs: SecurityLogsPane()
     case .advanced: AdvancedPane()
     case .activity: ActivityPane()
     case .about: AboutPane()

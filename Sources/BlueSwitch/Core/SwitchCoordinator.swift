@@ -147,6 +147,17 @@ final class SwitchCoordinator: ObservableObject {
         DemoMode.shared.demoPeripheralsConnectedHere = false
         self?.applyAudioOnRelease()
         Log.demo(.info, "Switch", "Peripherals sent to \(peerName) over AES-256-GCM")
+        SecureAuditVault.shared.logDemoConnection(
+          type: .networkOutbound,
+          action: "outbound_connectAll",
+          outcome: .authenticated,
+          severity: .info,
+          subject: peerName,
+          endpoint: "10.0.1.24:54820",
+          cipher: PeerCrypto.cipherName,
+          latencyMs: 12,
+          details: "Authenticated KVM handoff to \(peerName) (3 HID peripherals)"
+        )
         self?.succeed("Peripherals sent to \(peerName)")
       }
     } else {
@@ -159,6 +170,17 @@ final class SwitchCoordinator: ObservableObject {
         DemoMode.shared.demoPeripheralsConnectedHere = true
         self?.applyAudioOnConnect()
         Log.demo(.info, "Switch", "Peripherals connected to \(localName) (Bonded AES/E0 Encrypted)")
+        SecureAuditVault.shared.logDemoConnection(
+          type: .bluetoothHID,
+          action: "hid_connect_encrypted",
+          outcome: .authenticated,
+          severity: .info,
+          subject: "Magic Keyboard, Trackpad & Mouse",
+          endpoint: "XX:XX:XX:XX:8A:1F",
+          cipher: "Bonded Bluetooth AES/E0",
+          latencyMs: 42,
+          details: "Reclaimed 3 HID peripherals onto \(localName) (-50 dBm)"
+        )
         self?.succeed("Peripherals connected to \(localName)")
       }
     }

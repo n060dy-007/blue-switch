@@ -322,7 +322,7 @@ struct DemoPane: View {
         redactionRow("Local Computer & Bonjour Name", "Shown as \"\(demo.localMacDisplayName)\"")
         redactionRow("Peer Mac Names & IPv4 Hosts", "Shown as \"\(s.demoPeerMacName)\" · 10.0.1.24:54820")
         redactionRow("Bluetooth Peripheral & HCI MACs", "Masked as XX:XX:XX:XX:8A:1F (owner prefix stripped)")
-        redactionRow("Filesystem Paths & Usernames", "Sanitized to ~/Library/Logs/BlueSwitch/…")
+        redactionRow("Filesystem Paths & Audit Vault", "Isolated synthetic records · ~/Library/Application Support/BlueSwitch/SecurityAudit/…")
         redactionRow("Network Pairing Key & Repo Feed", "Locked as •••••••••••• · demo-org/blue-switch")
       }
     }
@@ -335,6 +335,300 @@ struct DemoPane: View {
       Spacer()
       Text(preview)
         .font(.caption.monospaced())
+        .foregroundStyle(.secondary)
+    }
+  }
+}
+
+// MARK: - Security Logs (Encrypted & Hash-Chained Connection Audit Vault)
+
+struct SecurityLogsPane: View {
+  @ObservedObject private var vault = SecureAuditVault.shared
+  @ObservedObject private var s = AppSettings.shared
+  @ObservedObject private var demo = DemoMode.shared
+
+  @State private var selectedType: ConnectionAuditType? = nil
+  @State private var minSeverity: LogLevel = .debug
+  @State private var search = ""
+
+  private var filteredRecords: [ConnectionAuditRecord] {
+    vault.visibleRecords.reversed().filter { r in
+      let matchesType = (selectedType == nil || r.type == selectedType)
+      let matchesLevel = (r.severity >= minSeverity)
+      let matchesSearch: Bool
+      if search.isEmpty {
+        matchesSearch = true
+      } else {
+        matchesSearch =
+          r.action.localizedCaseInsensitiveContains(search)
+          || r.subject.localizedCaseInsensitiveContains(search)
+          || r.endpoint.localizedCaseInsensitiveContains(search)
+          || r.cipher.localizedCaseInsensitiveContains(search)
+          || r.details.localizedCaseInsensitiveContains(search)
+      }
+      return matchesType && matchesLevel && matchesSearch
+    }
+  }
+
+  var body: some View {
+    VStack(spacing: 0) {
+      PaneHeader(pane: .securityLogs)
+
+      vaultPostureCard
+        .padding(.horizontal, 24)
+        .padding(.top, 10)
+
+      filterToolbar
+        .padding(.horizontal, 24)
+        .padding(.vertical, 10)
+
+      Card(padding: 0) {
+        if filteredRecords.isEmpty {
+          VStack {
+            Spacer()
+            EmptyStateRow(
+              symbol: "lock.doc",
+              text: "No matching connection security records"
+            )
+            Spacer()
+          }
+          .frame(maxWidth: .infinity)
+        } else {
+          ScrollView {
+            LazyVStack(alignment: .leading, spacing: 0) {
+              ForEach(filteredRecords) { rec in
+                auditRow(rec)
+                Divider().opacity(0.4)
+              }
+            }
+          }
+        }
+      }
+      .padding(.horizontal, 24)
+      .padding(.bottom, 12)
+
+      footerBar
+        .padding(.horizontal, 28)
+        .padding(.bottom, 14)
+    }
+  }
+
+  private var vaultPostureCard: some View {
+    let check = vault.effectiveVerification
+    return Card {
+      VStack(alignment: .leading, spacing: 10) {
+        HStack(spacing: 10) {
+          Label(
+            check.isValid
+              ? "Cryptographic Hash Chain Intact"
+              : "Vault Tamper / Integrity Alert",
+            systemImage: check.isValid ? "checkmark.seal.fill" : "exclamationmark.octagon.fill"
+          )
+          .font(.headline)
+          .foregroundStyle(check.isValid ? Theme.green : Theme.red)
+
+          Spacer()
+
+          StatusPill(
+            text: s.demoModeEnabled
+              ? "Demo Isolated Vault"
+              : (check.isValid ? "AES-256-GCM + HMAC Verified" : "Integrity Mismatch"),
+            color: s.demoModeEnabled ? Theme.amber : (check.isValid ? Theme.green : Theme.red)
+          )
+        }
+
+        Text(check.summaryText)
+          .font(.caption)
+          .foregroundStyle(.secondary)
+
+        HStack(spacing: 8) {
+          postureBadge("AES-256-GCM + AAD", symbol: "lock.fill", color: Theme.green)
+          postureBadge("HMAC-SHA256 Chain", symbol: "link", color: Theme.blue)
+          postureBadge(
+            s.demoModeEnabled
+              ? "macOS Keychain (ThisDeviceOnly)"
+              : vault.keyStorageBackend,
+            symbol: "key.fill",
+            color: Theme.indigo
+          )
+          postureBadge("0700 / 0600 · O_NOFOLLOW · No-Backup", symbol: "externaldrive.badge.checkmark", color: .teal)
+        }
+
+        HStack(spacing: 8) {
+          Text(vault.displayVaultPath)
+            .font(.caption2.monospaced())
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
+            .truncationMode(.middle)
+
+          Spacer()
+
+          Button {
+            vault.verifyChainNow()
+          } label: {
+            Label("Verify Chain", systemImage: "checkmark.shield")
+          }
+          .controlSize(.small)
+
+          Button {
+            vault.rotateNow()
+          } label: {
+            Label("Rotate Segment", systemImage: "arrow.triangle.2.circlepath")
+          }
+          .controlSize(.small)
+
+          Button {
+            vault.exportReport(redactPersonalInfo: true)
+          } label: {
+            Label("Export Redacted…", systemImage: "eye.slash")
+          }
+          .controlSize(.small)
+
+          Button {
+            vault.exportReport(redactPersonalInfo: false)
+          } label: {
+            Label("Export Full…", systemImage: "square.and.arrow.down")
+          }
+          .controlSize(.small)
+          .disabled(s.demoModeEnabled)
+
+          Button("Reveal") {
+            NSWorkspace.shared.selectFile(vault.vaultFilePath, inFileViewerRootedAtPath: "")
+          }
+          .controlSize(.small)
+          .disabled(s.demoModeEnabled)
+        }
+      }
+    }
+  }
+
+  private func postureBadge(_ text: String, symbol: String, color: Color) -> some View {
+    HStack(spacing: 4) {
+      Image(systemName: symbol).font(.system(size: 9, weight: .bold))
+      Text(text).font(.system(size: 10, weight: .semibold)).lineLimit(1)
+    }
+    .padding(.horizontal, 7).padding(.vertical, 3)
+    .background(Capsule().fill(color.opacity(0.14)))
+    .foregroundStyle(color)
+  }
+
+  private var filterToolbar: some View {
+    HStack(spacing: 10) {
+      Picker("Channel", selection: $selectedType) {
+        Text("All Connections").tag(ConnectionAuditType?.none)
+        Divider()
+        ForEach(ConnectionAuditType.allCases) { t in
+          Text(t.label).tag(ConnectionAuditType?.some(t))
+        }
+      }
+      .frame(width: 195)
+
+      Picker("Level", selection: $minSeverity) {
+        ForEach(LogLevel.allCases) { lvl in
+          Text(lvl.label + "+").tag(lvl)
+        }
+      }
+      .frame(width: 125)
+
+      TextField("Filter by peer, IP, MAC, cipher, or action…", text: $search)
+        .textFieldStyle(.roundedBorder)
+    }
+  }
+
+  private func auditRow(_ r: ConnectionAuditRecord) -> some View {
+    let displaySubject = s.demoModeEnabled ? demo.sanitizeLog(r.subject) : r.subject
+    let displayEndpoint = s.demoModeEnabled ? demo.sanitizeLog(r.endpoint) : r.endpoint
+    let displayDetails = s.demoModeEnabled ? demo.sanitizeLog(r.details) : r.details
+
+    return VStack(alignment: .leading, spacing: 4) {
+      HStack(alignment: .firstTextBaseline, spacing: 8) {
+        Text("#\(r.sequence)")
+          .font(.caption2.monospaced().weight(.bold))
+          .foregroundStyle(.secondary)
+          .frame(width: 42, alignment: .leading)
+
+        Text(r.timestamp, format: .dateTime.hour().minute().second())
+          .font(.caption.monospacedDigit())
+          .foregroundStyle(.secondary)
+          .frame(width: 68, alignment: .leading)
+
+        HStack(spacing: 4) {
+          Image(systemName: r.type.symbol).font(.system(size: 9))
+          Text(r.type.label).font(.system(size: 9, weight: .heavy))
+        }
+        .padding(.horizontal, 6).padding(.vertical, 2)
+        .background(Capsule().fill(r.type.tint.opacity(0.16)))
+        .foregroundStyle(r.type.tint)
+
+        Text(r.outcome.label.uppercased())
+          .font(.system(size: 8.5, weight: .black))
+          .padding(.horizontal, 5).padding(.vertical, 2)
+          .background(Capsule().fill(r.outcome.color.opacity(0.16)))
+          .foregroundStyle(r.outcome.color)
+
+        Text(displaySubject)
+          .font(.callout.weight(.semibold))
+          .lineLimit(1)
+
+        Text("·")
+          .foregroundStyle(.tertiary)
+
+        Text(displayEndpoint)
+          .font(.caption.monospaced())
+          .foregroundStyle(.secondary)
+          .lineLimit(1)
+
+        Spacer(minLength: 4)
+
+        if let ms = r.latencyMs {
+          Text("\(ms) ms")
+            .font(.caption2.monospacedDigit())
+            .foregroundStyle(.secondary)
+        }
+
+        Text(r.cipher)
+          .font(.system(size: 9.5, weight: .medium, design: .monospaced))
+          .padding(.horizontal, 6).padding(.vertical, 2)
+          .background(RoundedRectangle(cornerRadius: 4).fill(Color.primary.opacity(0.06)))
+          .foregroundStyle(.secondary)
+      }
+
+      HStack(spacing: 8) {
+        Text(r.action)
+          .font(.caption2.monospaced())
+          .foregroundStyle(.tertiary)
+        Text("—")
+          .font(.caption2)
+          .foregroundStyle(.tertiary)
+        Text(displayDetails)
+          .font(.caption)
+          .foregroundStyle(.secondary)
+          .textSelection(.enabled)
+        Spacer(minLength: 4)
+        Text("chain:\(String(r.entryHash.prefix(12)))…")
+          .font(.system(size: 9, design: .monospaced))
+          .foregroundStyle(.tertiary)
+      }
+      .padding(.leading, 42)
+    }
+    .padding(.horizontal, 12)
+    .padding(.vertical, 7)
+  }
+
+  private var footerBar: some View {
+    let sizeKB = String(format: "%.1f KB", Double(s.demoModeEnabled ? 18_432 : vault.activeVaultBytes) / 1024.0)
+    let archives = s.demoModeEnabled ? 1 : vault.archiveCount
+    return HStack {
+      Text(
+        s.demoModeEnabled
+          ? "Demo Mode: Showing isolated synthetic connection records (real encrypted vault hidden)"
+          : "Active vault: \(sizeKB) · \(archives) read-only archive(s) (max 10 MB × 5, auto-rotated)"
+      )
+      .font(.caption)
+      .foregroundStyle(.secondary)
+      Spacer()
+      Text("\(filteredRecords.count) / \(vault.visibleRecords.count) record(s)")
+        .font(.caption)
         .foregroundStyle(.secondary)
     }
   }
