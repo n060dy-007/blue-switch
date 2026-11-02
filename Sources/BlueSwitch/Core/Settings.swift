@@ -501,7 +501,10 @@ final class AppSettings: ObservableObject {
 
   private init() {
     let trimmedRepo = updateRepository.trimmingCharacters(in: .whitespacesAndNewlines)
-    if trimmedRepo.isEmpty || trimmedRepo.caseInsensitiveCompare("Fl0p/BlueSwitch") == .orderedSame {
+    if trimmedRepo.isEmpty
+      || trimmedRepo.caseInsensitiveCompare("Fl0p/BlueSwitch") == .orderedSame
+      || trimmedRepo.caseInsensitiveCompare("HoshimuraYuto/blue-switch") == .orderedSame
+    {
       updateRepository = "n060dy-007/blue-switch"
     }
   }

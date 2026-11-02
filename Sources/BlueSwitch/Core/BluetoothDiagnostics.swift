@@ -311,6 +311,9 @@ final class BluetoothDiagnosticsService: ObservableObject {
   private let scrubbedFlagKey = "bluetoothReliabilityScrubbedV2"
 
   private let hidLock = NSLock()
+  private let telemetryQueue = DispatchQueue(label: "com.blueswitch.bt-telemetry", qos: .utility)
+  private var ioBluetoothInitialized = false
+  private var isWarmingUpIOBluetooth = false
   private var cachedHIDNodesStorage: [HIDHardwareNode] = []
   private var cachedHIDNodesAt: Date = .distantPast
   private var accessoryPowerByName: [String: AccessoryPowerReading] = [:]
@@ -322,13 +325,49 @@ final class BluetoothDiagnosticsService: ObservableObject {
     loadBatteryCache()
     loadStats()
     pollAccessoryPowerAsync(force: true)
-    refreshTelemetry()
+  }
+
+  /// True once `IOBluetoothCoreBluetoothCoordinator` has safely completed initialization off the main thread.
+  var isIOBluetoothReady: Bool {
+    hidLock.lock()
+    defer { hidLock.unlock() }
+    return ioBluetoothInitialized
+  }
+
+  /// Initializes `IOBluetoothHostController` on a background queue while the main run loop is free
+  /// (avoiding macOS 26 `IOBluetoothCoreBluetoothCoordinator` main-thread semaphore deadlock).
+  func warmUpIOBluetoothAsync() {
+    guard CBManager.authorization == .allowedAlways else { return }
+    hidLock.lock()
+    if ioBluetoothInitialized || isWarmingUpIOBluetooth {
+      hidLock.unlock()
+      return
+    }
+    isWarmingUpIOBluetooth = true
+    hidLock.unlock()
+
+    telemetryQueue.async { [weak self] in
+      guard let self else { return }
+      let host = IOBluetoothHostController.default()
+      let powered = (host?.powerState == kBluetoothHCIPowerStateON)
+      self.hidLock.lock()
+      self.ioBluetoothInitialized = true
+      self.isWarmingUpIOBluetooth = false
+      self.hidLock.unlock()
+
+      DispatchQueue.main.async {
+        BluetoothService.shared.applyPoweredState(powered)
+        BluetoothService.shared.refresh()
+      }
+      self.refreshTelemetry()
+    }
   }
 
   // MARK: - Lifecycle & Watchdog
 
   func start() {
     pollAccessoryPowerAsync(force: true)
+    warmUpIOBluetoothAsync()
     refreshTelemetry()
     scheduleWatchdog()
   }
@@ -417,81 +456,103 @@ final class BluetoothDiagnosticsService: ObservableObject {
 
   func refreshTelemetry() {
     pollAccessoryPowerAsync(force: false)
-    let host = IOBluetoothHostController.default()
-    let powered = (host?.powerState == kBluetoothHCIPowerStateON)
-    let rawAddr = (host?.addressAsString() ?? "Unavailable")
-      .replacingOccurrences(of: "-", with: ":")
-      .uppercased()
-    let cod = host?.classOfDevice() ?? 0
-
-    let pairedDevices = (IOBluetoothDevice.pairedDevices() as? [IOBluetoothDevice]) ?? []
-    var map: [String: PeripheralSecurityTelemetry] = [:]
-
+    if !isIOBluetoothReady {
+      warmUpIOBluetoothAsync()
+    }
     let managed = BluetoothService.shared.peripherals
-    var entriesToInspect: [String: String] = [:]
-    for p in managed {
-      entriesToInspect[p.canonicalID] = p.name
-    }
-    for dev in pairedDevices {
-      if let addr = dev.addressString {
-        let canon = BluetoothPeripheral.canonicalMAC(addr)
-        if entriesToInspect[canon] == nil {
-          entriesToInspect[canon] = dev.name ?? "Bluetooth Device"
+    let statsSnapshot = statsByID
+
+    telemetryQueue.async { [weak self] in
+      guard let self else { return }
+      let ioReady = self.isIOBluetoothReady
+      let host: IOBluetoothHostController? = ioReady ? IOBluetoothHostController.default() : nil
+      let powered = ioReady ? (host?.powerState == kBluetoothHCIPowerStateON) : true
+      let rawAddr =
+        ioReady
+        ? (host?.addressAsString() ?? "Unavailable")
+          .replacingOccurrences(of: "-", with: ":")
+          .uppercased()
+        : "—"
+      let cod = ioReady ? (host?.classOfDevice() ?? 0) : 0
+      let pairedDevices: [IOBluetoothDevice] =
+        ioReady ? ((IOBluetoothDevice.pairedDevices() as? [IOBluetoothDevice]) ?? []) : []
+
+      var map: [String: PeripheralSecurityTelemetry] = [:]
+      var entriesToInspect: [String: String] = [:]
+      for p in managed {
+        entriesToInspect[p.canonicalID] = p.name
+      }
+      for dev in pairedDevices {
+        if let addr = dev.addressString {
+          let canon = BluetoothPeripheral.canonicalMAC(addr)
+          if entriesToInspect[canon] == nil {
+            entriesToInspect[canon] = dev.name ?? "Bluetooth Device"
+          }
         }
       }
-    }
 
-    var connectedHID = 0
-    var unencryptedActive = 0
-    var unsolicitedHID = 0
+      var connectedHID = 0
+      var unencryptedActive = 0
+      var unsolicitedHID = 0
 
-    for (canonID, fallback) in entriesToInspect {
-      let item = inspectDevice(id: canonID, fallbackName: fallback)
-      map[canonID] = item
+      for (canonID, fallback) in entriesToInspect {
+        let item = self.inspectDevice(
+          id: canonID, fallbackName: fallback, statsOverride: statsSnapshot)
+        map[canonID] = item
 
-      if item.isConnected && item.deviceClassMajor == 0x05 {
-        connectedHID += 1
-        if !item.isLinkEncrypted {
-          unencryptedActive += 1
-        }
-        let isManaged = managed.contains {
-          $0.canonicalID == canonID
-            || BluetoothPeripheral.canonicalName($0.name)
-              == BluetoothPeripheral.canonicalName(item.name)
-        }
-        if item.isIncoming && !item.isPaired && !isManaged {
-          unsolicitedHID += 1
-          handleUnsolicitedHIDThreat(item)
-        } else if !item.isLinkEncrypted && AppSettings.shared.btRequireEncryptedLink {
-          SecurityMonitor.shared.recordAudit(
-            category: "BluetoothSecurity",
-            message:
-              "Active HID device \(item.name) (\(item.id)) has an unencrypted link (mode \(item.encryptionMode))",
-            level: .warning
-          )
+        if item.isConnected && item.deviceClassMajor == 0x05 {
+          connectedHID += 1
+          if !item.isLinkEncrypted {
+            unencryptedActive += 1
+          }
+          let isManaged = managed.contains {
+            $0.canonicalID == canonID
+              || BluetoothPeripheral.canonicalName($0.name)
+                == BluetoothPeripheral.canonicalName(item.name)
+          }
+          if item.isIncoming && !item.isPaired && !isManaged {
+            unsolicitedHID += 1
+            self.handleUnsolicitedHIDThreat(item)
+          } else if !item.isLinkEncrypted && AppSettings.shared.btRequireEncryptedLink {
+            DispatchQueue.main.async {
+              SecurityMonitor.shared.recordAudit(
+                category: "BluetoothSecurity",
+                message:
+                  "Active HID device \(item.name) (\(item.id)) has an unencrypted link (mode \(item.encryptionMode))",
+                level: .warning
+              )
+            }
+          }
         }
       }
-    }
 
-    DispatchQueue.main.async {
-      self.telemetryByID = map
-      self.controllerInfo = BluetoothControllerSecurityInfo(
-        isPoweredOn: powered,
-        rawAddress: rawAddr,
-        isDiscoverable: false,
-        isConnectable: powered,
-        classOfDeviceHex: String(format: "0x%06X", cod),
-        pairedDevicesCount: pairedDevices.count,
-        connectedHIDCount: connectedHID,
-        unencryptedActiveCount: unencryptedActive,
-        unsolicitedHIDCount: unsolicitedHID
-      )
+      DispatchQueue.main.async {
+        if ioReady {
+          BluetoothService.shared.applyPoweredState(powered)
+        }
+        self.telemetryByID = map
+        self.controllerInfo = BluetoothControllerSecurityInfo(
+          isPoweredOn: powered,
+          rawAddress: rawAddr,
+          isDiscoverable: false,
+          isConnectable: powered,
+          classOfDeviceHex: String(format: "0x%06X", cod),
+          pairedDevicesCount: pairedDevices.count,
+          connectedHIDCount: connectedHID,
+          unencryptedActiveCount: unencryptedActive,
+          unsolicitedHIDCount: unsolicitedHID
+        )
+      }
     }
   }
 
-  private func inspectDevice(id: String, fallbackName: String) -> PeripheralSecurityTelemetry {
+  private func inspectDevice(
+    id: String, fallbackName: String,
+    statsOverride: [String: PeripheralReliabilityStats]? = nil
+  ) -> PeripheralSecurityTelemetry {
     let key = BluetoothPeripheral.canonicalMAC(id)
-    let stats = statsByID[key] ?? statsByID[id.uppercased()] ?? PeripheralReliabilityStats()
+    let sourceStats = statsOverride ?? statsByID
+    let stats = sourceStats[key] ?? sourceStats[id.uppercased()] ?? PeripheralReliabilityStats()
     let local = localConnectionAndBattery(id: id, name: fallbackName)
     let dev = resolveIOBluetoothDevice(id: id, name: fallbackName)
 
@@ -834,6 +895,10 @@ final class BluetoothDiagnosticsService: ObservableObject {
 
   /// Resolves an `IOBluetoothDevice` across colon/dash MAC formats and rotated BLE addresses.
   func resolveIOBluetoothDevice(id: String, name: String) -> IOBluetoothDevice? {
+    if !isIOBluetoothReady {
+      warmUpIOBluetoothAsync()
+      return nil
+    }
     let trimmed = id.trimmingCharacters(in: .whitespacesAndNewlines)
     let canonMAC = BluetoothPeripheral.canonicalMAC(trimmed)
     let dashMAC = canonMAC.replacingOccurrences(of: ":", with: "-").lowercased()
@@ -850,7 +915,8 @@ final class BluetoothDiagnosticsService: ObservableObject {
       candidates.append(d)
     }
 
-    let paired = (IOBluetoothDevice.pairedDevices() as? [IOBluetoothDevice]) ?? []
+    let paired: [IOBluetoothDevice] =
+      isIOBluetoothReady ? ((IOBluetoothDevice.pairedDevices() as? [IOBluetoothDevice]) ?? []) : []
     for dev in paired {
       if let addr = dev.addressString, BluetoothPeripheral.canonicalMAC(addr) == canonMAC {
         candidates.append(dev)
@@ -970,7 +1036,8 @@ final class BluetoothDiagnosticsService: ObservableObject {
       )
     }
 
-    let paired = (IOBluetoothDevice.pairedDevices() as? [IOBluetoothDevice]) ?? []
+    let paired: [IOBluetoothDevice] =
+      isIOBluetoothReady ? ((IOBluetoothDevice.pairedDevices() as? [IOBluetoothDevice]) ?? []) : []
     for dev in paired {
       guard let addr = dev.addressString else { continue }
       let mac = BluetoothPeripheral.canonicalMAC(addr)

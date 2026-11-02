@@ -27,6 +27,7 @@ ditto -x -k "$TMP_DIR/BlueSwitch.zip" "$TMP_DIR/extracted"
 echo "▸ Stopping running BlueSwitch (if any) …"
 killall BlueSwitch 2>/dev/null || true
 sleep 0.5
+killall -9 BlueSwitch 2>/dev/null || true
 
 echo "▸ Installing to /Applications/BlueSwitch.app …"
 rm -rf /Applications/BlueSwitch.app

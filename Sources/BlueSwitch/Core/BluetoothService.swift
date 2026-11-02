@@ -106,7 +106,11 @@ final class BluetoothService: NSObject, ObservableObject {
       let count = self.activePairs.count + self.busyIDs.count
       for (id, pair) in self.activePairs {
         pair.delegate = nil
-        if !(IOBluetoothDevice(addressString: id)?.isConnected() ?? false) {
+        let isConn =
+          BluetoothDiagnosticsService.shared.isIOBluetoothReady
+          ? (IOBluetoothDevice(addressString: id)?.isConnected() ?? false)
+          : false
+        if !isConn {
           pair.stop()
         }
       }
@@ -123,6 +127,12 @@ final class BluetoothService: NSObject, ObservableObject {
         message: "Manual HCI pairing session reset completed (\(count) session(s) cleared)",
         level: .info
       )
+    }
+  }
+
+  func applyPoweredState(_ powered: Bool) {
+    if isPoweredOn != powered {
+      isPoweredOn = powered
     }
   }
 
@@ -161,7 +171,13 @@ final class BluetoothService: NSObject, ObservableObject {
   }
 
   private func refreshStatusOnly() {
-    isPoweredOn = IOBluetoothHostController.default()?.powerState == kBluetoothHCIPowerStateON
+    if let cm = centralManager {
+      if cm.state == .poweredOff {
+        isPoweredOn = false
+      } else if cm.state == .poweredOn {
+        isPoweredOn = true
+      }
+    }
     if let cm = centralManager, cm.state == .poweredOn {
       let bleHID = cm.retrieveConnectedPeripherals(withServices: [
         CBUUID(string: "1812"), CBUUID(string: "180F"),
@@ -177,6 +193,9 @@ final class BluetoothService: NSObject, ObservableObject {
       connectedBLECanonicalNames.removeAll()
       bleLock.unlock()
     }
+    if !BluetoothDiagnosticsService.shared.isIOBluetoothReady {
+      BluetoothDiagnosticsService.shared.warmUpIOBluetoothAsync()
+    }
     refreshTick &+= 1
   }
 
@@ -184,8 +203,14 @@ final class BluetoothService: NSObject, ObservableObject {
   func refresh() {
     refreshStatusOnly()
     authorization = CBManager.authorization
+    guard BluetoothDiagnosticsService.shared.isIOBluetoothReady else {
+      BluetoothDiagnosticsService.shared.warmUpIOBluetoothAsync()
+      BluetoothDiagnosticsService.shared.refreshTelemetry()
+      return
+    }
     queue.async { [weak self] in
       guard let self else { return }
+      let powered = IOBluetoothHostController.default()?.powerState == kBluetoothHCIPowerStateON
       let paired = (IOBluetoothDevice.pairedDevices() as? [IOBluetoothDevice]) ?? []
       if paired.isEmpty {
         Log.debug(
@@ -196,14 +221,15 @@ final class BluetoothService: NSObject, ObservableObject {
         guard let addr = dev.addressString else { return nil }
         return BluetoothPeripheral(id: addr, name: dev.name ?? "Unknown Device")
       }
+      let pairedMACs = Set(list.map(\.canonicalID))
       DispatchQueue.main.async {
+        self.applyPoweredState(powered)
         // Reconcile any managed BLE peripheral whose MAC rotated after macOS re-pairing
         var updatedManaged = self.peripherals
         var didReconcileMAC = false
         for i in updatedManaged.indices {
           let existing = updatedManaged[i]
-          let oldDev = IOBluetoothDevice(addressString: existing.id)
-          if oldDev?.isPaired() == true || oldDev?.isConnected() == true { continue }
+          if pairedMACs.contains(existing.canonicalID) { continue }
           let canonName = BluetoothPeripheral.canonicalName(existing.name)
           guard !canonName.isEmpty, canonName != "unknown device", canonName != "bluetooth device"
           else { continue }
@@ -328,8 +354,11 @@ final class BluetoothService: NSObject, ObservableObject {
     isAutoHeal: Bool = false,
     completion: ((Int, Int) -> Void)?
   ) {
-    guard isPoweredOn || IOBluetoothHostController.default()?.powerState == kBluetoothHCIPowerStateON
-    else {
+    let ioPowered =
+      BluetoothDiagnosticsService.shared.isIOBluetoothReady
+      ? (IOBluetoothHostController.default()?.powerState == kBluetoothHCIPowerStateON)
+      : isPoweredOn
+    guard isPoweredOn || ioPowered else {
       Log.error("Bluetooth is turned off", "Bluetooth")
       completion?(0, list.count)
       return
@@ -386,7 +415,8 @@ final class BluetoothService: NSObject, ObservableObject {
           let connected = self.performConnectPass(
             for: p, pass: pass, totalPasses: attempts, pairTimeout: pairTimeout)
           if connected {
-            let dev = IOBluetoothDevice(addressString: p.id)
+            let dev = BluetoothDiagnosticsService.shared.resolveIOBluetoothDevice(
+              id: p.id, name: p.name)
             let paired = dev?.isPaired() ?? true
             let encMode = BluetoothDiagnosticsService.queryEncryptionMode(dev)
             let rssiVal = dev?.rssi() ?? Constants.invalidRSSI
@@ -784,6 +814,8 @@ extension BluetoothService: CBCentralManagerDelegate {
         title: "BlueSwitch needs Bluetooth access",
         body: "Open System Settings → Privacy & Security → Bluetooth and turn on BlueSwitch.",
         kind: .error)
+    } else if authorization == .allowedAlways {
+      BluetoothDiagnosticsService.shared.warmUpIOBluetoothAsync()
     }
     refresh()
   }
